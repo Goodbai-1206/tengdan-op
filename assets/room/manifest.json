@@ -1,0 +1,65 @@
+{
+ "glb": {
+  "file": "room.glb",
+  "bytes": 9945744
+ },
+ "lm": {
+  "0": {
+   "file": "lm_0.jpg",
+   "scale": 6.0,
+   "bytes": 363840
+  },
+  "1": {
+   "file": "lm_1.jpg",
+   "scale": 6.0,
+   "bytes": 260304
+  },
+  "2": {
+   "file": "lm_2.jpg",
+   "scale": 6.0,
+   "bytes": 331170
+  },
+  "3": {
+   "file": "lm_3.jpg",
+   "scale": 4.0,
+   "bytes": 239018
+  },
+  "4": {
+   "file": "lm_4.jpg",
+   "scale": 2.0,
+   "bytes": 52833
+  },
+  "5": {
+   "file": "lm_5.jpg",
+   "scale": 4.0,
+   "bytes": 115305
+  },
+  "6": {
+   "file": "lm_6.jpg",
+   "scale": 2.0,
+   "bytes": 367528
+  },
+  "7": {
+   "file": "lm_7.jpg",
+   "scale": 2.5,
+   "bytes": 1083573
+  }
+ },
+ "lmB": {
+  "atlas": "5",
+  "file": "lm_5b.jpg",
+  "scale": 4.0,
+  "bytes": 127952
+ },
+ "sky": {
+  "file": "sky.jpg",
+  "scale": 4.0,
+  "bytes": 144568
+ },
+ "env": {
+  "file": "env.jpg",
+  "scale": 1.0,
+  "bytes": 1029
+ },
+ "totalBytes": 13032864
+}
