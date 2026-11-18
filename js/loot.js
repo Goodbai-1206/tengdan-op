@@ -277,7 +277,7 @@ export function createLoot(stage, content, hooks = {}) {
       el.classList.add('unknown');
     } else if (e.state === 'searching') {
       el.classList.add('searching');
-      // 搜索中：按最终占格大小的深色斜纹底 + 正中一个静止的白色放大镜（参考录屏：没有转圈、没有进度环）
+      // 搜索中：按最终占格大小的深色斜纹底 + 正中一个绕小圈平移的白色放大镜（参考录屏：1 秒一圈，没有进度环）；未搜到的条目也按占格显示同样的斜纹底
       const rg = h('div', 'srch');
       rg.innerHTML = '<div class="mag">' + ic('search') + '</div>';
       el.appendChild(rg);

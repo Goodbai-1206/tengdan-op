@@ -233,11 +233,14 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 
 /* ---- 搜索中：正在搜的那一件按最终占格大小露出一块深色斜纹底（比空格更黑），正中一个静止的白色放大镜（高约单格宽的 45%）；
         还没轮到的件不显示（仍是空格）。放大镜没有任何动画、进度环或虚线圈 ---- */
-.it.unknown { background: none; pointer-events: none; }
+.it.unknown { background: repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 2px, rgba(255,255,255,0) 2px 7px), #0d0e10; box-shadow: inset 0 0 0 1px rgba(255,255,255,.10); pointer-events: none; }
 .it.searching { background: repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 2px, rgba(255,255,255,0) 2px 7px), #0d0e10; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); pointer-events: none; }
 .it .srch { position: absolute; inset: 0; }
 .it .mag { position: absolute; left: 50%; top: 50%; width: calc(var(--cs) * .45); height: calc(var(--cs) * .45); margin: calc(var(--cs) * -.225) 0 0 calc(var(--cs) * -.225); color: #fff; }
 .it .mag .ic { width: 100%; height: 100%; stroke-width: 2.2; }
+/* 搜索中：放大镜绕小圈平移（不自转），顺时针 1 秒一圈，半径约 5% 格宽（实机录屏逐帧量得） */
+.it.searching .mag { animation: mag-orbit 1s linear infinite; }
+@keyframes mag-orbit { from { transform: rotate(0deg) translateX(calc(var(--cs) * .05)) rotate(0deg); } to { transform: rotate(360deg) translateX(calc(var(--cs) * .05)) rotate(-360deg); } }
 
 /* ---- 显形动画：24 帧（0.4 秒），逐帧对应 loot_spec 第 4 节，用新品质色 ----
    帧0 品质色实心；帧1~2 泛白；帧3 图出现+亮白描边；帧4~6 满色底+外扩光晕；帧7 起名字数字；帧9~24 褪回静止态 */
