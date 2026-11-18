@@ -482,31 +482,61 @@ export function createWorld(host, W, H) {
     const CORF_K = Number(Q.get('ck') || 0.45).toFixed(3), CORF_REF = (1 + Number(Q.get('ck') || 0.45) * 2.56).toFixed(3);   // 楼道距离衰减：K 越大越暗得快；REF 让 1.6 米处亮度不变
     const done = new Set();
     // 楼道专用环境反射：偏暗的暖灰环境 + 天花上的灯 + 地平线一圈被灯照亮的对面墙，让半亮漆面的门和五金有柔和的高光带
-    const corEnvTex = (() => {
+    const mkCorEnv = (stops, blobs) => {
       const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const g = cv.getContext('2d');
-      const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, '#6b5f4c'); gr.addColorStop(0.42, '#8a7a62'); gr.addColorStop(0.55, '#7d6f58'); gr.addColorStop(1, '#2a2620');
+      const gr = g.createLinearGradient(0, 0, 0, 256); for (const [p, c] of stops) gr.addColorStop(p, c);
       g.fillStyle = gr; g.fillRect(0, 0, 512, 256);
       const blob = (x, y, r, a, c) => { const rg = g.createRadialGradient(x, y, 0, x, y, r); rg.addColorStop(0, 'rgba(' + c + ',' + a + ')'); rg.addColorStop(1, 'rgba(' + c + ',0)'); g.fillStyle = rg; g.fillRect(x - r, y - r, r * 2, r * 2); };
-      blob(256, 18, 90, 1.0, '255,226,170'); blob(60, 118, 70, 0.55, '255,214,160'); blob(300, 120, 90, 0.5, '255,222,176'); blob(440, 122, 60, 0.4, '255,210,150');
+      for (const b of blobs) blob(...b);
+      const t = new THREE.CanvasTexture(cv); t.mapping = THREE.EquirectangularReflectionMapping; t.colorSpace = THREE.SRGBColorSpace;
+      const pm2 = new THREE.PMREMGenerator(renderer); const r = pm2.fromEquirectangular(t).texture; pm2.dispose(); t.dispose(); return r;
+    };
+    const corEnvTex = mkCorEnv([[0, '#6b5f4c'], [0.42, '#8a7a62'], [0.55, '#7d6f58'], [1, '#2a2620']], [[256, 18, 90, 1.0, '255,226,170'], [60, 118, 70, 0.55, '255,214,160'], [300, 120, 90, 0.5, '255,222,176'], [440, 122, 60, 0.4, '255,210,150']]);
+    // 门板/门框亮漆用的中性灰环境：暖色环境的反射只抬 R 和 G，门会偏橙红；参考图里门的反光接近中性
+    const corEnvGrey = mkCorEnv([[0, '#6f6a62'], [0.42, '#7a7670'], [0.55, '#6e6a64'], [1, '#2a2a2a']], [[256, 18, 90, 1.0, '255,236,205'], [60, 118, 70, 0.55, '255,230,200'], [300, 120, 90, 0.5, '255,232,205'], [440, 122, 60, 0.4, '255,226,195']]);
+    // 五金专用环境：深灰底 + 几条明亮的竖向灯带和天花灯斑，金属表面反射出亮暗过渡和高光带（拉丝不锈钢的样子）
+    const corEnvMetal = (() => {
+      const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const g = cv.getContext('2d');
+      const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, '#47433d'); gr.addColorStop(0.45, '#1f1d1a'); gr.addColorStop(0.6, '#161412'); gr.addColorStop(1, '#0a0908');
+      g.fillStyle = gr; g.fillRect(0, 0, 512, 256);
+      for (const [x, w, a] of [[40, 26, 0.95], [150, 18, 0.7], [250, 40, 1.0], [350, 22, 0.8], [455, 30, 0.9]]) { const lg = g.createLinearGradient(x - w, 0, x + w, 0); lg.addColorStop(0, 'rgba(255,240,215,0)'); lg.addColorStop(0.5, 'rgba(255,244,225,' + a + ')'); lg.addColorStop(1, 'rgba(255,240,215,0)'); g.fillStyle = lg; g.fillRect(x - w, 20, w * 2, 150); }
+      const rg = g.createRadialGradient(256, 14, 0, 256, 14, 80); rg.addColorStop(0, 'rgba(255,248,230,1)'); rg.addColorStop(1, 'rgba(255,248,230,0)'); g.fillStyle = rg; g.fillRect(176, 0, 160, 100);
       const t = new THREE.CanvasTexture(cv); t.mapping = THREE.EquirectangularReflectionMapping; t.colorSpace = THREE.SRGBColorSpace;
       const pm2 = new THREE.PMREMGenerator(renderer); const r = pm2.fromEquirectangular(t).texture; pm2.dispose(); t.dispose(); return r;
     })();
     const CORR = new Set(['5', '8', '9']);   // 楼道三个图集：5 墙和邻居门，8 地面/梯级/天花/栏杆，9 302 门板和五金
     // 走廊图集（含房门）有两张光照图：关门版 / 开门版，按开门进度混合
-    const blendMat = (m, lmBtex, fall) => {
+    const RAIL_K = (Q.get('rk') || '1.0,1.4,1.1').split(',').map(x => Number(x).toFixed(2)).join(', ');
+    // 墙面细颗粒假凹凸（URL 开关 wb=1 才开）：用世界坐标的三维值噪声调制墙面亮度，像乳胶漆/拉毛的细颗粒。不占显存；颗粒比像素还小时按屏幕导数淡出，免得远处闪烁
+    const WB = Q.get('wb') === '1', WB_A = Number(Q.get('wba') || 0.22);
+    const addBump = m => {
+      const prev = m.onBeforeCompile, pk = m.customProgramCacheKey ? m.customProgramCacheKey.bind(m) : null;
+      m.onBeforeCompile = (sh, rd) => {
+        if (prev) prev(sh, rd);
+        const NL = String.fromCharCode(10);
+        if (sh.vertexShader.indexOf('vBWp') < 0) sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>' + NL + 'varying vec3 vBWp;').replace('#include <begin_vertex>', '#include <begin_vertex>' + NL + 'vBWp = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>' + NL + 'varying vec3 vBWp;' + NL + 'float bh13(vec3 p) { vec3 q = fract(p * 0.1031); q += dot(q, q.zyx + 31.32); return fract((q.x + q.y) * q.z); }' + NL +
+          'float bvn(vec3 p) { vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(mix(bh13(i), bh13(i + vec3(1,0,0)), f.x), mix(bh13(i + vec3(0,1,0)), bh13(i + vec3(1,1,0)), f.x), f.y), mix(mix(bh13(i + vec3(0,0,1)), bh13(i + vec3(1,0,1)), f.x), mix(bh13(i + vec3(0,1,1)), bh13(i + vec3(1,1,1)), f.x), f.y), f.z); }')
+          .replace('#include <map_fragment>', '#include <map_fragment>' + NL + 'float bfw = length(fwidth(vBWp)); float bAtt = 1.0 - smoothstep(0.0012, 0.0045, bfw); float bn = bvn(vBWp * 420.0) * 0.6 + bvn(vBWp * 1100.0 + 17.0) * 0.4; diffuseColor.rgb *= 1.0 + ' + WB_A.toFixed(3) + ' * (bn - 0.5) * 2.0 * bAtt;');
+      };
+      m.customProgramCacheKey = () => (pk ? pk() : 'x') + 'wb';
+    };
+    const blendMat = (m, lmBtex, fall, rail) => {
       const FALL = fall ? 'corFall(vWPos)' : '1.0';
       m.onBeforeCompile = sh => {
         sh.uniforms.lightMap2 = { value: lmBtex }; sh.uniforms.uOpen = doorOpenU; sh.uniforms.uLamp = { value: new THREE.Vector3(-3.75, 2.3, 1.4) };
         const NL = String.fromCharCode(10);
+        // 栏杆和扶手：图集8里这些绿漆像素的 G 明显高于 R/B，单独提亮（光照图里它们几乎全黑）
+        if (rail) sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>' + NL + 'float railG = diffuseColor.g - max(diffuseColor.r, diffuseColor.b); diffuseColor.rgb *= mix(vec3(1.0), vec3(' + RAIL_K + '), smoothstep(0.008, 0.03, railG));');
         // 楼道：在光照图之外再按「到楼道灯的距离」做平方反比式的明暗过渡（灯下亮，两端、墙角、天花板边缘暗），平均亮度不变
         sh.vertexShader = sh.vertexShader
           .replace('#include <common>', '#include <common>' + NL + 'varying vec3 vWPos;')
           .replace('#include <begin_vertex>', '#include <begin_vertex>' + NL + 'vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         sh.fragmentShader = sh.fragmentShader
           .replace('#include <lightmap_pars_fragment>', '#include <lightmap_pars_fragment>' + NL + 'uniform sampler2D lightMap2;' + NL + 'uniform float uOpen;' + NL + 'uniform vec3 uLamp;' + NL + 'varying vec3 vWPos;' + NL + 'float corFall(vec3 p) { float d = distance(p, uLamp); return clamp(' + CORF_REF + ' / (1.0 + ' + CORF_K + ' * d * d), 0.0, 2.2); }')
-          .replace('#include <lights_fragment_maps>', THREE.ShaderChunk.lights_fragment_maps.replace('vec3 lightMapIrradiance = lightMapTexel.rgb * lightMapIntensity;', 'vec3 lightMapIrradiance = mix(lightMapTexel.rgb, texture2D(lightMap2, vLightMapUv).rgb, uOpen) * lightMapIntensity * ' + FALL + ';'));   // 注意：onBeforeCompile 时 include 还没展开，要把 chunk 取出来再替换
+          .replace('#include <lights_fragment_maps>', THREE.ShaderChunk.lights_fragment_maps.replace('vec3 lightMapIrradiance = lightMapTexel.rgb * lightMapIntensity;', 'vec3 lightMapIrradiance = (mix(lightMapTexel.rgb, texture2D(lightMap2, vLightMapUv).rgb, uOpen) + (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.15 / 255.0) * lightMapIntensity * ' + FALL + ';'));   // 注意：onBeforeCompile 时 include 还没展开，要把 chunk 取出来再替换
       };
-      m.customProgramCacheKey = () => 'lmBlend' + (fall ? 'F' : 'N');
+      m.customProgramCacheKey = () => 'lmBlend' + (fall ? 'F' : 'N') + (rail ? 'R' : '');
     };
     gltf.scene.traverse(o => {
       if (!o.isMesh) return;
@@ -546,6 +576,17 @@ export function createWorld(host, W, H) {
           m.lightMapIntensity = lmMap[ai[1]].s * Math.PI * gain;
           m.metalness = 0; m.roughness = cfg.r; m.envMapIntensity = cfg.env;
           if (cfg.col) m.color.setRGB(cfg.col[0], cfg.col[1], cfg.col[2]);
+          if (ai[2] === 'sofa') { m.envMap = corEnvMetal; m.envMapIntensity = Number(Q.get('sofae') || 1.8); }   // 皮沙发：显式挂带亮灯带的环境图，才有皮面高光（scene.environment 的材质强度不生效）
+          if (ai[2] === 'wardrobe') {   // 衣柜：颜色图里有发黄脏斑 -> 把色相拉回灰棕；光照图（烘焙噪点）带来的划痕和斑块 -> 采样时取周围 3x3 的最亮值与中心平均（暗划痕被抹掉；不用平均模糊，会把相邻暗岛屿的颜色混进来）；再垫一点底色免得敞开的门板背面死黑
+            m.emissive.setRGB(0.012, 0.009, 0.007);
+            m.lightMapIntensity *= Number(Q.get('wdg') || 1.12);
+            m.onBeforeCompile = sh => {
+              const NL = String.fromCharCode(10);
+              sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>' + NL + 'float wl = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114)); diffuseColor.rgb = mix(vec3(wl) * vec3(1.18, 0.88, 0.68), diffuseColor.rgb, 0.3);')
+                .replace('#include <lights_fragment_maps>', THREE.ShaderChunk.lights_fragment_maps.replace('vec4 lightMapTexel = texture2D( lightMap, vLightMapUv );', 'vec4 lightMapTexel = texture2D(lightMap, vLightMapUv); vec4 wmx = lightMapTexel; for (int wy = -1; wy <= 1; wy++) for (int wx = -1; wx <= 1; wx++) wmx = max(wmx, texture2D(lightMap, vLightMapUv + vec2(float(wx), float(wy)) * 0.0034)); lightMapTexel = 0.5 * (lightMapTexel + wmx);'));
+            };
+            m.customProgramCacheKey = () => 'wardDesat2';
+          }
           if (m.map) m.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
           m.needsUpdate = true;
           return;
@@ -561,19 +602,31 @@ export function createWorld(host, W, H) {
           // 新版 three 里 scene.environment 的强度由 scene.environmentIntensity 统一决定，材质自己的 envMapIntensity 不生效；楼道和门牌要单独控制反射，所以显式挂上 envMap
           const isC = CORR.has(k[1]);
           if (isC || (k[1] === '4' && k[2] === 'gloss')) {
-            if (k[2] === 'metal') { m.envMap = corEnvTex; m.envMapIntensity = Number(Q.get('cem') || (k[1] === '9' ? 0.12 : 1.6)); m.metalness = 0.55; }   // 门五金(图集9)：反射太强会变一片死白，压到 0.12 才是拉丝不锈钢的灰
-            else if (k[2] === 'gloss') { m.envMap = corEnvTex; m.envMapIntensity = Number(Q.get('ceg') || (k[1] === '9' ? 0.8 : k[1] === '5' ? 0.6 : 1.1)); m.metalness = 0; m.roughness = 0.3; }   // 门板和门框的亮漆：反射减弱，免得发白发橘}
+            if (k[2] === 'metal') { m.envMap = corEnvMetal; m.envMapIntensity = Number(Q.get('cem') || 1.0); m.metalness = Number(Q.get('cmm') || 0.9); m.roughness = Number(Q.get('cmr') || 0.3); }   // 门五金(图集9)：反射太强会变一片死白，压到 0.12 才是拉丝不锈钢的灰
+            else if (k[2] === 'gloss') { m.envMap = k[1] === '4' ? corEnvTex : corEnvGrey; m.envMapIntensity = Number(Q.get('ceg') || (k[1] === '9' ? 0.35 : k[1] === '5' ? 0.3 : 1.1)); m.metalness = 0; m.roughness = 0.3; }   // 门板和门框的亮漆：反射减弱，免得发白发橘}
             else { m.envMap = scene.environment; m.envMapIntensity = Number(Q.get('cenv') || 0.24); }
           }
           if (isC) {
-            m.lightMapIntensity *= Number(Q.get('cg') || (k[1] === '9' ? (k[2] === 'metal' ? 0.604 : 0.762) : 3.2));   // 门(图集9)的光照图本身较亮，不再额外放大 3.2 倍，改成略压暗（门板深红棕）
-            if (k[1] !== '9') m.color.setRGB(Number(Q.get('ccr') || 0.94), Number(Q.get('ccg') || 0.98), Number(Q.get('ccb') || 1.38));   // 楼道比屋里暗：老楼昏暗
+            m.lightMapIntensity *= Number(Q.get('cg') || (k[1] === '9' ? (k[2] === 'metal' ? 0.604 : Number(Q.get('cg9') || 0.45)) : (k[2] === 'gloss' && k[1] === '5' ? Number(Q.get('cg5') || 0.75) : 3.2)));   // 门(图集9)的光照图本身较亮，不再额外放大 3.2 倍，改成略压暗（门板深红棕）
+            if (k[1] === '5' && k[2] === 'gloss') m.emissive.setRGB(0.002, 0.0004, 0);
+            if (k[1] === '9' && k[2] !== 'metal') m.emissive.setRGB(0.001, 0.0002, 0);   // 302 门框侧面光照图近黑，垫一点深棕底色
+   // 邻居门背光面光照图近乎全黑，垫一点深棕底色，免得一块死黑
+            if (k[1] !== '9') m.color.setRGB(Number(Q.get('ccr') || 0.94), Number(Q.get('ccg') || 0.98), Number(Q.get('ccb') || (k[2] === 'gloss' && k[1] === '5' ? 1.0 : 1.38)));   // 门框和邻居门(a5 gloss)不加蓝，免得抬高 B 通道   // 楼道比屋里暗：老楼昏暗
           }
           if (m.map) m.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          if (lmBs[k[1]]) blendMat(m, lmBs[k[1]], k[1] !== '9');
+          if (lmBs[k[1]]) blendMat(m, lmBs[k[1]], k[1] !== '9', k[1] === '8' && k[2] === 'matte');
+          if (k[1] === '2' && k[2] === 'semi') {   // 书桌面（图集2的 semi）：贴图太红太饱和，参考是中等棕色偏灰：向亮度拉回一半多，并提亮
+            const dS = Number(Q.get('dsat') || 0.45).toFixed(3), dG = Number(Q.get('dgain') || 2.0).toFixed(3);
+            m.onBeforeCompile = sh => { sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>' + String.fromCharCode(10) + 'float dl0 = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)); diffuseColor.rgb = mix(vec3(dl0), diffuseColor.rgb, ' + dS + ') * ' + dG + ';'); };
+            m.customProgramCacheKey = () => 'deskDesat';
+          }
+          if (WB && k[2] === 'matte' && '01258'.indexOf(k[1]) >= 0) addBump(m);
           m.needsUpdate = true;
         }
       });
+    });
+    gltf.scene.traverse(o => {   // 衣柜敞开的门板内侧光照图近黑：单独复制材质垫一点深灰棕底色（共用的 a3_semi 不能动）
+      if (o.isMesh && /^wd_door_b_/.test(o.name) && !Array.isArray(o.material) && o.material.name === 'a3_semi') { o.material = o.material.clone(); o.material.emissive.setRGB(0.04, 0.028, 0.022); }
     });
     built = true;
     scene.add(gltf.scene);
@@ -655,7 +708,7 @@ export function createWorld(host, W, H) {
         '  vec3 b = (texture2D(tDiffuse, vUv + vec2(uTexel.x, 0.0)).rgb + texture2D(tDiffuse, vUv - vec2(uTexel.x, 0.0)).rgb + texture2D(tDiffuse, vUv + vec2(0.0, uTexel.y)).rgb + texture2D(tDiffuse, vUv - vec2(0.0, uTexel.y)).rgb) * 0.25;',
         '  c += (c - b) * uSharp;',
         '  c = max(c, vec3(0.0));',
-        '  c = max((c - 0.18) * uCon + 0.18, vec3(0.0));',
+        '  float l0 = dot(c, vec3(0.2126, 0.7152, 0.0722)); c *= pow(max(l0, 1e-5) / 0.18, uCon - 1.0);',   // 对比度只作用于亮度、三通道等比例缩放：逐通道减 0.18 会把暗而饱和的颜色（门、衣柜）的 G/B 削成 0，变成纯红
         '  float l = dot(c, vec3(0.2126, 0.7152, 0.0722)); c = mix(vec3(l), c, uSat);',
         '  vec2 q = vUv - 0.5; c *= 1.0 - uVig * dot(q, q) * 2.2;',
         '  c += (hash(vUv * (1.0 / uTexel) + uTime) - 0.5) * uGrain * (0.4 + l);',
@@ -681,41 +734,41 @@ export function createWorld(host, W, H) {
 
   // ===== 窗外夜景：单独一张 2048x1024 的程序绘制夜景（天际线 + 亮灯窗户 + 月亮），挂在窗外，比天空盒清晰得多 =====
   function nightCityTex() {
+    // 窗外夜景（挂在窗外的一块 MeshBasicMaterial 平面，不吃光照图）。材质颜色会把贴图整体乘约 2.8 倍（线性空间），这里按「最终想要的屏幕颜色」反推贴图颜色
+    const K = 7.0, dec = v => Math.pow(v / 255, 2.2), enc = v => Math.round(255 * Math.pow(Math.min(Math.max(v, 0), 1), 1 / 2.2));
+    const fin = (r0, g0, b0, a = 1) => 'rgba(' + enc(dec(r0) / K) + ',' + enc(dec(g0) / K) + ',' + enc(dec(b0) / K) + ',' + a + ')';
     const cv = document.createElement('canvas'); cv.width = 2048; cv.height = 1024;
     const g = cv.getContext('2d');
-    // 天空：偏灰的深藏青到近黑
-    const sky = g.createLinearGradient(0, 0, 0, 1024); sky.addColorStop(0, '#05070b'); sky.addColorStop(0.5, '#0d121b'); sky.addColorStop(1, '#1c2330');
+    // 天空：蓝灰，越靠近地平线越亮
+    const sky = g.createLinearGradient(0, 0, 0, 1024); sky.addColorStop(0, fin(78, 84, 108)); sky.addColorStop(0.5, fin(104, 112, 138)); sky.addColorStop(1, fin(124, 132, 156));
     g.fillStyle = sky; g.fillRect(0, 0, 2048, 1024);
     const r = rng(77);
-    for (let i = 0; i < 90; i++) { g.fillStyle = 'rgba(210,215,225,' + (0.12 + r() * 0.3) + ')'; g.fillRect(r() * 2048, r() * 420, 1.6, 1.6); }
-    g.fillStyle = 'rgba(200,200,190,0.5)'; g.beginPath(); g.arc(1560, 190, 26, 0, 7); g.fill();
-    g.fillStyle = 'rgba(200,200,190,0.06)'; g.beginPath(); g.arc(1560, 190, 80, 0, 7); g.fill();
-    // 三层剪影：远（浅灰蓝、窗灯少）、中、近（最暗最高），窗灯是暖黄小点、疏密不均
+    // 三层楼群：远（浅蓝灰、有雾）、中、近（最暗最高）；每栋楼画整齐的窗格（暗窗略深于楼体），亮灯的窗成行成列，暖黄居多
     const layers = [
-      { col: '#1a212d', hmin: 120, hmax: 380, wmin: 80, wmax: 170, lit: 0.05, step: 22, a: 0.55 },
-      { col: '#10151e', hmin: 200, hmax: 560, wmin: 100, wmax: 210, lit: 0.10, step: 24, a: 0.75 },
-      { col: '#090c12', hmin: 300, hmax: 720, wmin: 120, wmax: 260, lit: 0.07, step: 26, a: 0.9 }
+      { body: [108, 115, 138], cell: [97, 104, 128], hmin: 220, hmax: 440, wmin: 90, wmax: 190, lit: 0.10, step: 22, a: 0.7 },
+      { body: [76, 81, 100], cell: [65, 70, 88], hmin: 270, hmax: 560, wmin: 110, wmax: 230, lit: 0.14, step: 26, a: 0.85 },
+      { body: [48, 51, 68], cell: [39, 42, 57], hmin: 330, hmax: 640, wmin: 130, wmax: 280, lit: 0.16, step: 30, a: 1.0 }
     ];
     for (const L of layers) {
       let x = -60;
       while (x < 2100) {
         const bw = L.wmin + r() * (L.wmax - L.wmin), bh = L.hmin + r() * (L.hmax - L.hmin), y = 1024 - bh;
-        g.fillStyle = L.col; g.fillRect(x, y, bw, bh);
-        // 疏密不均：每栋楼有自己的亮灯密度，且按「楼层」成片亮/暗
-        const dens = L.lit * (0.2 + r() * 1.8);
-        for (let wy = y + 16; wy < 1010; wy += L.step) {
-          const rowOn = r() < 0.55;
-          for (let wx = x + 10; wx < x + bw - 12; wx += L.step - 8) {
-            if (rowOn && r() < dens * 2.2) { const warm = r() > 0.18; g.fillStyle = warm ? 'rgba(255,208,128,' + (0.45 + r() * 0.4) * L.a + ')' : 'rgba(200,225,245,' + (0.35 + r() * 0.3) * L.a + ')'; g.fillRect(wx, wy, 6, 8); }
+        g.fillStyle = fin(...L.body); g.fillRect(x, y, bw, bh);
+        const dens = L.lit * (0.3 + r() * 1.7);
+        for (let wy = y + 14; wy < 1010; wy += L.step) {
+          const rowOn = r() < 0.6;
+          for (let wx = x + 8; wx < x + bw - 12; wx += L.step - 6) {
+            g.fillStyle = fin(...L.cell); g.fillRect(wx, wy, L.step - 12, L.step - 12);
+            if (rowOn && r() < dens * 2.4) { g.fillStyle = r() > 0.2 ? fin(255, 222, 150, L.a) : fin(210, 230, 250, L.a); g.fillRect(wx + 2, wy + 2, L.step - 16, L.step - 16); }
           }
         }
-        x += bw + 4 + r() * 22;
+        x += bw + 3 + r() * 16;
       }
     }
     // 轻微虚化（景深）：把整张图用小半径模糊重绘一遍（不支持 ctx.filter 的浏览器就保持原样）
     const out = document.createElement('canvas'); out.width = 2048; out.height = 1024;
     const g2 = out.getContext('2d');
-    g2.filter = 'blur(1.6px)'; g2.drawImage(cv, 0, 0); g2.filter = 'none';
+    g2.filter = 'blur(1.4px)'; g2.drawImage(cv, 0, 0); g2.filter = 'none';
     const t = new THREE.CanvasTexture(out); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = renderer.capabilities.getMaxAnisotropy();
     return t;
   }
@@ -759,7 +812,7 @@ export function createWorld(host, W, H) {
   }
   function addNightWindow() {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(22, 11), new THREE.MeshBasicMaterial({ map: nightCityTex(), color: new THREE.Color(0.66, 0.67, 0.71).multiplyScalar(Number(Q.get('nw') || 4.2)) }));
-    m.rotation.y = -Math.PI / 2; m.position.set(11, 3.2, -0.2); m.userData.noOcc = true; scene.add(m);
+    m.rotation.y = -Math.PI / 2; m.position.set(11, 3.2, -0.2); m.userData.noOcc = true; m.name = 'night_window'; m.visible = Q.get('hidewin') !== '1'; scene.add(m);
   }
   // ===== 灯具附近柔和辉光：加色混合的小光晕精灵（几乎零成本）=====
   const glows = [];

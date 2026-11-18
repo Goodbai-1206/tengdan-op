@@ -487,9 +487,10 @@ export function createLoot(stage, content, hooks = {}) {
   const ecKeep = h('button', 'end-btn ec-keep'); ecKeep.innerHTML = '<span>继续搜索</span>';
   const ecGo = h('button', 'end-btn sec ec-go'); ecGo.innerHTML = '<span>确定撤离</span>';
   const ecRow = h('div', 'end-btns'); ecRow.append(ecKeep, ecGo);
-  confirmBox.append(confirmMsg, ecRow); confirmEl.append(confirmBox); stage.appendChild(confirmEl);
+  const confirmSub = h('div', 'ec-sub', '确定现在撤离？');
+  confirmBox.append(confirmMsg, confirmSub, ecRow); confirmEl.append(confirmBox); stage.appendChild(confirmEl);
   function confirmExit(left) {
-    confirmMsg.textContent = '还有 ' + left + ' 件物资没搜出，确定撤离？';
+    confirmMsg.textContent = '还有 ' + left + ' 件物资没搜出';
     confirmEl.classList.remove('hidden');
     return new Promise(res => {
       const done = v => { confirmEl.classList.add('hidden'); ecKeep.onclick = ecGo.onclick = null; res(v); };
