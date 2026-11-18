@@ -812,8 +812,8 @@ export function createLoot(stage, content, hooks = {}) {
   const endBtns = h('div', 'end-btns');
   const memoBtn = h('button', 'end-btn memo'); memoBtn.innerHTML = ic('camera') + '<span>纪念</span>'; memoBtn.title = '保存纪念图';
   const backBtn = h('button', 'end-btn sec back'); backBtn.innerHTML = ic('leave') + '<span>返回房间</span>'; backBtn.title = '回到房间继续';
-  const evacBtn = h('button', 'end-btn sec evac'); evacBtn.innerHTML = ic('leave') + '<span>再来一局</span>'; evacBtn.title = '重新开始一局';
-  endBtns.append(memoBtn, backBtn, evacBtn);
+  const evacBtn = h('button', 'end-btn sec evac'); evacBtn.innerHTML = ic('leave') + '<span>重新开始</span>'; evacBtn.title = '重新开始一局';
+  endBtns.append(memoBtn, evacBtn);   // 撤离即结束：不再提供「返回房间」
   const evacFade = h('div', 'evac-fade');
   endBox.append(endHead, endList, endBtns);
   end.append(confetti, endBox);
