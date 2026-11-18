@@ -475,7 +475,11 @@ export function createLoot(stage, content, hooks = {}) {
   function hideBigToast() { clearTimeout(bigT); bigToast.classList.remove('on'); }
   function showBigToast(msg, ms = 3000) {
     if (endingUp) return;
-    bigToast.textContent = msg; bigToast.classList.add('on');
+    const parts = String(msg).split(' · ');     // 「主句 · 副句」拆成两行：主句大字，副句小字
+    bigToast.innerHTML = '';
+    bigToast.append(h('b', 'et-main', parts[0]));
+    if (parts[1]) bigToast.append(h('span', 'et-sub', parts.slice(1).join(' · ')));
+    bigToast.classList.remove('on'); void bigToast.offsetWidth; bigToast.classList.add('on');
     clearTimeout(bigT); bigT = setTimeout(() => bigToast.classList.remove('on'), ms);
   }
   const confirmEl = h('div', 'exit-confirm hidden');
