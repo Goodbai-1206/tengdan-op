@@ -2,9 +2,11 @@
 import { normalizeContent, CONTAINER_IDS } from './config.js';
 import * as audio from './audio.js';
 import { initStage, createControls, view, onStageResize } from './controls.js';
-import { createWorld, COLLIDERS, PLAYER_R, EYE_H, PLAYER_START, DOOR_OPEN_COLLIDER } from './world.js';
+import { createWorld, COLLIDERS, PLAYER_R, EYE_H, PLAYER_START, DOOR_OPEN_COLLIDER, EXIT_POINT } from './world.js';
 // 旧开场（js/intro.js，含 world.ext 夜景外立面、style.css 的 .intro* 样式）已摘出流程，文件保留；新开场从 playIntro() 接入。
 import { createLoot } from './loot.js';
+import { createMusic } from './music.js';
+import { diag } from './diag.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -38,9 +40,11 @@ onStageResize(resizeWorld);
 resizeWorld();
 
 const ctl = createControls($('touch'), $('joy'), $('joy-knob'), { onInteract: () => tryInteract() });
-const loot = createLoot(stage, content, { onChange: () => updateProgress() });
+const loot = createLoot(stage, content, { onChange: () => updateProgress(), onAllCollected: () => { $('progress').classList.remove('flash'); void $('progress').offsetWidth; $('progress').classList.add('flash'); } });
 
 const player = { x: PLAYER_START.x, z: PLAYER_START.z, yaw: PLAYER_START.yaw, pitch: PLAYER_START.pitch, bob: 0, stepIdx: 0, moveAmt: 0 };
+const music = createMusic(stage, { tracksUrl: params.get('mt') || null });
+music.init();
 let state = 'title';
 let nearId = null;
 let autoLook = null;
@@ -104,12 +108,26 @@ function updatePlayer(dt) {
 // ---------- 交互检测：准星对准才提示 ----------
 const searchBtn = $('search-btn');
 const AIM_FAR = 3.2;          // 对准多远就描边（米）
+const SPK_NEAR = 2.2;         // 音响小，近到多少出现「音乐」按钮
 const AIM_NEAR = 1.8;         // 近到多少才出现「搜索」按钮（米）
 const HINT_ENABLED = new URLSearchParams(location.search).get('nohint') !== '1';   // 测试用：?nohint=1 关闭    // 防卡关轻提示总开关
 const HINT_FIRST = 45, HINT_EVERY = 30, HINT_DUR = 1.2;   // 首次等待 / 之后间隔 / 一次呼吸时长（秒）
 const xhair = document.createElement('div');
 xhair.id = 'xhair'; xhair.style.display = 'none';
 stage.appendChild(xhair);
+let exitArmed = false, allGot = false, actionMode = null;
+const SEARCH_IC = searchBtn.innerHTML;
+const MUSIC_IC = '<svg class="hud-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17.5V6l10-2v11.5"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/></svg>';
+const EXIT_IC = '<svg class="hud-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h4a1.5 1.5 0 0 1 1.5 1.5v13A1.5 1.5 0 0 1 18 20h-4"/><path d="M4 12h9"/><path d="M9.5 8.5L13 12l-3.5 3.5"/></svg><span class="btn-lb">撤离</span>';
+function setActionMode(m) {
+  if (m === actionMode) return;
+  actionMode = m;
+  searchBtn.classList.toggle('show', !!m);
+  searchBtn.classList.toggle('m-exit', m === 'exit');
+  searchBtn.classList.toggle('m-music', m === 'music');
+  searchBtn.dataset.mode = m || '';
+  if (m) { searchBtn.innerHTML = m === 'exit' ? EXIT_IC : m === 'music' ? MUSIC_IC : SEARCH_IC; searchBtn.setAttribute('aria-label', m === 'exit' ? '撤离' : m === 'music' ? '音乐' : '搜索'); }
+}
 let hintNext = Infinity, hintT0 = -1, aimTick = 0, aimCache = null;
 function resetHint() { hintNext = performance.now() + HINT_FIRST * 1000; hintT0 = -1; }
 function updateNear() {
@@ -117,18 +135,22 @@ function updateNear() {
   const exploring = state === 'explore';
   if (xhair.style.display !== (exploring ? '' : 'none')) xhair.style.display = exploring ? '' : 'none';
   if (exploring) { if ((aimTick++ & 3) === 0) aimCache = world.pickAim(AIM_FAR); aim = aimCache; } else aimCache = null;   // 射线检测降到约 1/4 帧率（布料网格面数多）
-  const cleared = !!aim && loot.status(aim.id) === 'cleared';
+  const isSp = !!aim && aim.id === 'speaker';
+  const cleared = !!aim && !isSp && loot.status(aim.id) === 'cleared';
   world.setAim(aim ? aim.id : null, cleared);
-  const best = aim && !cleared && aim.dist < AIM_NEAR ? aim.id : null;
-  if (best !== nearId) {
-    nearId = best;
-    searchBtn.classList.toggle('show', !!best);
-  }
+  const best = aim && !cleared && aim.dist < (isSp ? SPK_NEAR : AIM_NEAR) ? aim.id : null;
+  nearId = best;
+  // 撤离点（门垫半径内）：走出过一次范围后才生效，免得一进屋就弹「撤离」；瞄着容器时让位给搜索
+  const dEx = Math.hypot(player.x - EXIT_POINT.x, player.z - EXIT_POINT.z);
+  if (dEx > EXIT_POINT.r + 0.5) exitArmed = true;
+  const inExit = exploring && exitArmed && dEx < EXIT_POINT.r;
+  setActionMode(!exploring ? null : best === 'speaker' ? 'music' : best ? 'search' : inExit ? 'exit' : null);
+  world.setExitGuide(exploring && allGot);
   // 防卡关：很久没开新搜索点，让还没搜的容器描边缓慢呼吸一次
-  if (HINT_ENABLED && exploring && aim) {
+  if (HINT_ENABLED && !allGot && exploring && aim) {
     // 玩家正对着某个容器时不叫轻提示（否则别的容器会跟着亮），取消正在进行的这次，之后按间隔再来
     if (hintT0 >= 0) { hintT0 = -1; hintNext = performance.now() + HINT_EVERY * 1000; CONTAINER_IDS.forEach(id => world.setHint(id, 0)); }
-  } else if (HINT_ENABLED && exploring) {
+  } else if (HINT_ENABLED && !allGot && exploring) {
     const now = performance.now();
     if (hintT0 < 0 && now >= hintNext) hintT0 = now;
     const pending = CONTAINER_IDS.filter(id => loot.status(id) !== 'cleared');
@@ -148,13 +170,35 @@ function updateNear() {
     const moved = Math.hypot(e.offsetX - d0.x, e.offsetY - d0.y), dt = performance.now() - d0.t;
     d0 = null;
     if (moved > 8 || dt > 300) return;
-    const hit = world.pickAt(e.offsetX / tl.offsetWidth * 2 - 1, -(e.offsetY / tl.offsetHeight * 2 - 1), AIM_NEAR);
-    if (hit && loot.status(hit.id) !== 'cleared') { audio.uiClick(); startSearch(hit.id); }
+    const hit = world.pickAt(e.offsetX / tl.offsetWidth * 2 - 1, -(e.offsetY / tl.offsetHeight * 2 - 1), SPK_NEAR);
+    if (hit && hit.id === 'speaker') { audio.uiClick(); openMusic(); }
+    else if (hit && hit.dist < AIM_NEAR && loot.status(hit.id) !== 'cleared') { audio.uiClick(); startSearch(hit.id); }
   });
 })();
 
 function tryInteract() {
-  if (state === 'explore' && nearId) startSearch(nearId);
+  if (state !== 'explore') return;
+  if (nearId === 'speaker') openMusic();
+  else if (nearId) startSearch(nearId);
+  else if (actionMode === 'exit') requestExit();
+}
+// 音响面板：开着时玩家不能动，关了回探索
+async function openMusic() {
+  if (state !== 'explore') return;
+  state = 'music'; ctl.setEnabled(false); nearId = null; setActionMode(null);
+  await music.openPanel();
+  state = 'explore'; ctl.setEnabled(true);
+}
+// 撤离：全部搜出直接结算；否则先问一句
+async function requestExit() {
+  if (state !== 'explore') return;
+  const c = loot.counts(), full = c.got >= c.total;
+  state = 'confirm'; ctl.setEnabled(false); setActionMode(null);
+  if (!full) {
+    const ok = await loot.confirmExit(c.total - c.got);
+    if (!ok) { state = 'explore'; ctl.setEnabled(true); return; }
+  }
+  await runEnding(full);
 }
 searchBtn.addEventListener('click', () => { audio.uiClick(); tryInteract(); });
 
@@ -162,12 +206,12 @@ searchBtn.addEventListener('click', () => { audio.uiClick(); tryInteract(); });
 const LOOK_Y = { desk: 0.62, wardrobe: 1.1, chest: 0.4 };
 const OPEN_SFX = { desk: audio.drawerOpen, wardrobe: audio.wardrobeOpen, chest: audio.chestOpen };
 
-function updateProgress() { const c = loot.counts(); $('progress').querySelector('.pn').textContent = c.got + '/' + c.total; }
+function updateProgress() { const c = loot.counts(); $('progress').querySelector('.pn').textContent = c.got + '/' + c.total; allGot = c.total > 0 && c.got >= c.total; }
 
 async function startSearch(id) {
   state = 'search';
   ctl.setEnabled(false);
-  nearId = null; searchBtn.classList.remove('show'); xhair.style.display = 'none';   // 立刻藏准星，不等下一帧（低帧率设备上会多留好几秒）
+  nearId = null; setActionMode(null); xhair.style.display = 'none';   // 立刻藏准星，不等下一帧（低帧率设备上会多留好几秒）
   resetHint();
   const c = world.containers[id];
   const dx = c.access.x - player.x, dz = c.access.z - player.z, d = Math.max(0.3, Math.hypot(dx, dz));
@@ -190,13 +234,8 @@ async function startSearch(id) {
   autoLook = { yaw: player.yaw, pitch: 0, release: 0.7 }; // 离开把视线抬回水平
   syncMarkers();
   updateProgress();
-  if (res.allDone) {
-    await sleep(1000);
-    await runEnding();
-  } else {
-    state = 'explore';
-    ctl.setEnabled(true);
-  }
+  state = 'explore';      // 13/13 也回到探索，由玩家自己去门口撤离
+  ctl.setEnabled(true);
 }
 
 // 3D 标记：还有东西没拿保持亮，全拿完才变灰
@@ -209,33 +248,38 @@ async function openBag() {
   if (state !== 'explore') return;
   state = 'bag';
   ctl.setEnabled(false);
-  nearId = null; searchBtn.classList.remove('show');
+  nearId = null; setActionMode(null);
   await loot.openBag();
   state = 'explore';
   ctl.setEnabled(true);
 }
 $('bag-btn').addEventListener('click', () => { audio.uiClick(); openBag(); });
 
-async function runEnding() {
+async function runEnding(full) {
   state = 'ending';
-  const all = loot.bagItems();
-  $('review-btn').classList.remove('show');
-  await loot.showEnding(all);
+  ctl.setEnabled(false); setActionMode(null);
+  { const tt = document.querySelector('.exit-toast'); if (tt) tt.classList.remove('on'); }   // 「物资已全部搜出」提示别盖在结算页上
+  const c = loot.counts();
+  loot.dim(true); await sleep(650);                       // 0.6 秒压暗再出结算层
+  const p = loot.showEnding(loot.bagItems(), { full, found: c.got, total: c.total });
+  await sleep(120); loot.dim(false);
+  await p;                                                // 点「返回房间」才会返回；「再来一局」整页重载
+  player.x = PLAYER_START.x; player.z = PLAYER_START.z; player.yaw = PLAYER_START.yaw; player.pitch = PLAYER_START.pitch;
+  exitArmed = false; resetHint();
   state = 'explore';
   ctl.setEnabled(true);
-  $('review-btn').classList.add('show');
 }
-$('review-btn').addEventListener('click', () => { audio.uiClick(); if (state === 'explore') { ctl.setEnabled(false); runEnding(); } });
 
 // ---------- 进入探索 ----------
 function enterExplore() {
   state = 'explore';
-  resetHint();
+  resetHint(); exitArmed = false;
   player.x = PLAYER_START.x; player.z = PLAYER_START.z; player.yaw = PLAYER_START.yaw; player.pitch = PLAYER_START.pitch;
   world.setMarkersVisible(true);
   $('hud').classList.remove('hidden');
   updateProgress();
   ctl.setEnabled(true);
+  music.startAuto();
   const hint = $('hint'); hint.classList.add('show');
   setTimeout(() => hint.classList.remove('show'), 5000);
 }
@@ -342,10 +386,26 @@ const cover = (() => {
     btn.style.setProperty('--p', p + '%');
     label.textContent = '加载中 ' + p + '%';
   };
-  const roomTask = world.ready.catch(e => console.error(e)).then(() => { roomFrac = 1; });
-  world.onProgress(f => { roomFrac = f; show(); });
+  // 房间加载失败：读条停住，按钮改成「加载失败，点这里重试」，不会亮出「开始行动」
+  const msgEl = $('cv-msg');
+  let roomOk = false, failed = false;
+  const trackRoom = p => p.then(() => { roomFrac = 1; roomOk = true; failed = false; msgEl.textContent = ''; diag('封面：房间加载完成'); }, e => {
+    console.error(e); failed = true; diag('封面：加载失败 ' + (e && e.message));
+    label.textContent = '加载失败，点这里重试';
+    btn.disabled = false; btn.classList.add('is-failed');
+    msgEl.textContent = '无法下载：' + ((e && e.file) || '未知文件') + '（' + ((e && e.reason) || (e && e.message) || '未知原因') + '）';
+    msgEl.classList.add('is-err');
+  });
+  const roomTask = trackRoom(world.ready);
+  world.onProgress(f => { roomFrac = f; if (!failed) show(); });
+  const retry = () => {
+    if (!failed) return;
+    failed = false; roomFrac = 0; btn.disabled = true; btn.classList.remove('is-failed'); msgEl.textContent = ''; msgEl.classList.remove('is-err');
+    show(); diag('封面：点击重试');
+    trackRoom(world.reload()).then(() => { if (roomOk && !ready && doneSmall >= tasks.length) finish(); });
+  };
   const finish = () => {
-    if (ready) return; ready = true;
+    if (ready || !roomOk) return; ready = true;
     btn.style.setProperty('--p', '100%');
     label.textContent = '开始行动';
     btn.disabled = false;
@@ -353,8 +413,8 @@ const cover = (() => {
   };
   tasks.forEach(t => t.then(() => { doneSmall++; show(); }));
   Promise.all(tasks.concat(roomTask)).then(finish);
-  setTimeout(finish, 45000);   // 兜底：个别资源失败或网络极慢时也放行
-  return { get ready() { return ready; } };
+  setTimeout(finish, 45000);   // 兜底：封面小图或字体迟迟不回时也放行；但房间没加载好绝不放行（finish 里有判断）
+  return { get ready() { return ready; }, get failed() { return failed; }, retry };
 })();
 
 const sndBtn = $('snd-btn');
@@ -366,8 +426,10 @@ sndBtn.addEventListener('click', () => {
 
 // ---------- 启动页 ----------
 $('start-btn').addEventListener('click', () => {
+  if (cover.failed) { cover.retry(); return; }
   if (!cover.ready || state !== 'title') return;
   audio.unlock();
+  music.prime();
   try { const el = document.documentElement; if (el.requestFullscreen) el.requestFullscreen().catch(() => {}); else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen(); } catch (e) { /* 静默 */ }
   try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {}); } catch (e) { /* 静默 */ }
   audio.uiClick();
@@ -380,6 +442,8 @@ $('start-btn').addEventListener('click', () => {
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  music.update(dt, { active: state !== 'title' && state !== 'intro', x: player.x, z: player.z, ducked: loot.isOpen });
+  world.setSpeaker(music.playing, music.level);
   if (state === 'intro') {
     if (introRun) introRun();
     world.update(dt);
@@ -400,7 +464,7 @@ requestAnimationFrame(frame);
 // ---------- 调试入口 ----------
 if (params.get('debug') === '1') {
   window.__game = {
-    content, world, player, ctl, loot, audio, view,
+    content, world, player, ctl, loot, audio, view, music,
     get state() { return state; },
     get searched() { return CONTAINER_IDS.filter(id => loot.status(id) === 'cleared'); },
     teleportTo(id) {
@@ -408,6 +472,7 @@ if (params.get('debug') === '1') {
       player.x = s.x; player.z = s.z; player.yaw = s.yaw; player.pitch = s.pitch || 0;
     },
     openContainer(id) { return startSearch(id); },
+    requestExit, refreshProgress: updateProgress, get allGot() { return allGot; }, get actionMode() { return actionMode; }, EXIT_POINT,
     skipIntro() { const el = document.querySelector('.in2'); if (el && !el.classList.contains('hidden')) el.dispatchEvent(new Event('pointerdown')); },
     start() { $('start-btn').click(); },
     tickAim() { applyCamera(0); world.camera.updateMatrixWorld(true); aimTick = 0; updateNear(); world.update(0.3); world.update(0.3); },   // 测试用：立即刷新一次瞄准并让淡入淡出走完

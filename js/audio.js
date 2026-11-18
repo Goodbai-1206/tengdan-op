@@ -40,13 +40,17 @@ export function _attachOffline(c) {
   for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
 }
 
+// 给音乐模块用：把 <audio> 元素接进同一条总线（总音量/静音/压缩器共用）
+export function getBus() { return ctx && ctx.state !== 'closed' ? { ctx, master } : null; }
+
 const ok = () => !!ctx && ctx.state !== 'closed';
 const now = () => ctx.currentTime;
 const midi = n => 440 * Math.pow(2, (n - 69) / 12);
 
-// 单个音：起音/衰减包络，可滑音
+// 测试用：记录每个发声体的开始时刻和每次显形声的时刻，用来断言「没有持续声、每件只响一次」
+export const _log = { reveals: [], voices: [] };
 function tone(o) {
-  const t0 = (o.t || 0) + now();
+  const t0 = (o.t || 0) + now(); _log.voices.push(t0);
   const osc = ctx.createOscillator(), g = ctx.createGain();
   osc.type = o.type || 'sine';
   osc.frequency.setValueAtTime(o.f, t0);
@@ -64,7 +68,7 @@ function tone(o) {
 
 // 噪声：经滤波器，可扫频
 function noise(o) {
-  const t0 = (o.t || 0) + now();
+  const t0 = (o.t || 0) + now(); _log.voices.push(t0);
   const src = ctx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
   const f = ctx.createBiquadFilter(); f.type = o.ftype || 'lowpass';
   f.frequency.setValueAtTime(o.f, t0);
@@ -184,6 +188,7 @@ function clack(g, tail) {
 }
 export function revealSfx(rarity) {
   if (!ok()) return;
+  _log.reveals.push(now());
   switch (rarity) {
     case 'green': clack(0.8); break;
     case 'blue': clack(1, 'blue'); break;
@@ -191,37 +196,6 @@ export function revealSfx(rarity) {
     case 'red': clack(0.85, 'red'); break;
     default: clack(1);
   }
-}
-
-// 搜索中的循环声：低音量的翻找摩擦声（噪声型），音量不规则起伏，比显形声低 15dB 以上；搜完即停
-let loop = null;
-export function searchLoopStart() {
-  if (!ok() || loop) return;
-  const src = ctx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
-  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1700; bp.Q.value = 0.8;
-  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 4200;
-  const g = ctx.createGain(); g.gain.value = 0.0001;
-  const l1 = ctx.createOscillator(); l1.frequency.value = 6.3;      // 摩擦的快起伏
-  const l2 = ctx.createOscillator(); l2.frequency.value = 1.35;     // 慢起伏，让它不像机械节拍
-  const lg1 = ctx.createGain(); lg1.gain.value = 0.0035;
-  const lg2 = ctx.createGain(); lg2.gain.value = 0.0035;
-  l1.connect(lg1); lg1.connect(g.gain); l2.connect(lg2); lg2.connect(g.gain);
-  g.gain.setValueAtTime(0.0001, now());
-  g.gain.exponentialRampToValueAtTime(0.0065, now() + 0.15);        // 基础音量 + 起伏，峰值约 0.011（显形声约 0.083）
-  src.connect(bp); bp.connect(lp); lp.connect(g); g.connect(master);
-  src.start(now(), Math.random() * 1.5); l1.start(); l2.start();
-  loop = { src, g, l1, l2 };
-}
-export const _loopOn = () => !!loop;   // 测试用
-export function searchLoopStop() {
-  if (!loop || !ok()) { loop = null; return; }
-  const L = loop; loop = null;
-  const t = now();
-  L.g.gain.cancelScheduledValues(t);
-  L.g.gain.setValueAtTime(Math.max(L.g.gain.value, 0.0001), t);
-  L.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
-  const stop = () => { try { L.src.stop(); L.l1.stop(); L.l2.stop(); } catch (e) { /* 静默 */ } };
-  if (ctx.constructor.name === 'OfflineAudioContext') stop(); else setTimeout(stop, 140);
 }
 
 // 界面类都很轻（比显形声低 15~25dB）
@@ -235,6 +209,9 @@ export function putIn() {
 }
 export function dragStart() { if (!ok()) return; noise({ f: 2000, f2: 5500, ftype: 'bandpass', q: 0.8, dur: 0.38, attack: 0.08, gain: 0.09 }); }
 export function dropClick() { if (!ok()) return; noise({ f: 2500, ftype: 'highpass', dur: 0.03, attack: 0.002, gain: 0.1 }); }
+
+// 13/13 提示音：两声轻轻的上行铃音
+export function exitCue() { if (!ok()) return; tone({ f: midi(76), dur: 0.5, type: 'sine', gain: 0.07, attack: 0.005 }); tone({ t: 0.16, f: midi(83), dur: 0.7, type: 'sine', gain: 0.06, attack: 0.005 }); }
 
 function chord(notes, t, dur, type, gain, spread = 0.06) {
   notes.forEach((n, i) => tone({ t: t + i * spread, f: midi(n), dur, type, gain, attack: 0.01 }));

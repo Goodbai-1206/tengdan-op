@@ -239,7 +239,7 @@ export function createLoot(stage, content, hooks = {}) {
 
   // ---------- 状态 ----------
   let isOpen = false, mode = 'search', cur = null;   // mode: 'search' | 'bag'
-  let sess = null, closeResolve = null, closing = false, allDoneTimer = 0;
+  let sess = null, closeResolve = null, closing = false, allDoneTimer = 0, allAnnounced = false;
   let sel = null;
   let press = null, drag = null, hlEls = [], taking = false;
   const GAP = 4;                 // 格子间距
@@ -277,14 +277,9 @@ export function createLoot(stage, content, hooks = {}) {
       el.classList.add('unknown');
     } else if (e.state === 'searching') {
       el.classList.add('searching');
-      // 搜索中的持续反馈：细环轨道 + 一段匀速旋转的弧 + 随搜索时长填满的琥珀进度弧，放大镜轻轻摆动
-      const dur = RARITY[it.rarity].dur;
+      // 搜索中：按最终占格大小的深色斜纹底 + 正中一个静止的白色放大镜（参考录屏：没有转圈、没有进度环）
       const rg = h('div', 'srch');
-      rg.style.setProperty('--dur', dur + 's');
-      rg.innerHTML = '<svg viewBox="0 0 40 40" class="ring"><circle class="trk" cx="20" cy="20" r="17"/>' +
-        '<circle class="prg" cx="20" cy="20" r="17" pathLength="100"/></svg>' +
-        '<svg viewBox="0 0 40 40" class="spin"><circle cx="20" cy="20" r="17" pathLength="100"/></svg>' +
-        '<div class="mag">' + ic('search') + '</div>';
+      rg.innerHTML = '<div class="mag">' + ic('search') + '</div>';
       el.appendChild(rg);
     } else {
       const Rr = RARITY[it.rarity];
@@ -473,6 +468,32 @@ export function createLoot(stage, content, hooks = {}) {
   }
   sortBtn.onclick = () => sortBag();
 
+  // 舞台级提示条（面板开着也能看到）和二次确认框
+  const bigToast = h('div', 'exit-toast'); stage.appendChild(bigToast);
+  let bigT = 0;
+  let endingUp = false;     // 结算页在时，舞台提示条一律不显示
+  function hideBigToast() { clearTimeout(bigT); bigToast.classList.remove('on'); }
+  function showBigToast(msg, ms = 3000) {
+    if (endingUp) return;
+    bigToast.textContent = msg; bigToast.classList.add('on');
+    clearTimeout(bigT); bigT = setTimeout(() => bigToast.classList.remove('on'), ms);
+  }
+  const confirmEl = h('div', 'exit-confirm hidden');
+  const confirmBox = h('div', 'ec-box'); const confirmMsg = h('div', 'ec-msg');
+  const ecKeep = h('button', 'end-btn ec-keep'); ecKeep.innerHTML = '<span>继续搜索</span>';
+  const ecGo = h('button', 'end-btn sec ec-go'); ecGo.innerHTML = '<span>确定撤离</span>';
+  const ecRow = h('div', 'end-btns'); ecRow.append(ecKeep, ecGo);
+  confirmBox.append(confirmMsg, ecRow); confirmEl.append(confirmBox); stage.appendChild(confirmEl);
+  function confirmExit(left) {
+    confirmMsg.textContent = '还有 ' + left + ' 件物资没搜出，确定撤离？';
+    confirmEl.classList.remove('hidden');
+    return new Promise(res => {
+      const done = v => { confirmEl.classList.add('hidden'); ecKeep.onclick = ecGo.onclick = null; res(v); };
+      ecKeep.onclick = () => { audio.uiClick(); done(false); };
+      ecGo.onclick = () => { audio.uiClick(); done(true); };
+    });
+  }
+
   let toastT = 0;
   function showToast(msg) {
     toast.textContent = msg; toast.classList.add('on');
@@ -490,8 +511,11 @@ export function createLoot(stage, content, hooks = {}) {
     refreshCounts(); refreshInfo(); setValue();
     changed();
     const c = counts();
-    if (isOpen && c.got === c.total && !closing && !allDoneTimer) {
-      allDoneTimer = setTimeout(() => { allDoneTimer = 0; if (isOpen) closePanel(); }, 750);
+    if (c.got === c.total && c.total > 0 && !allAnnounced) {      // 13/13：不自动关面板、不自动结算，只提示去门口撤离
+      allAnnounced = true;
+      showBigToast('物资已全部搜出 · 到门口撤离', 3000);
+      audio.exitCue();
+      if (hooks.onAllCollected) hooks.onAllCollected();
     }
   }
 
@@ -715,13 +739,10 @@ export function createLoot(stage, content, hooks = {}) {
     await sleep(START_DELAY);
     if (s.dead) return;
     const pending = k.entries.filter(e => e.state === 'unknown').sort((a, b) => a.idx - b.idx);
-    if (pending.length) audio.searchLoopStart();       // 轻轻的翻找摩擦声，搜完即停
-    try {
-      for (const e of pending) {
-        if (s.dead || k.entries.indexOf(e) < 0) return;
-        if (!(await revealOne(s, k, e))) return;     // 显形后同一刻进入下一件，件与件零间隔
-      }
-    } finally { audio.searchLoopStop(); }
+    for (const e of pending) {      // 搜索过程没有持续声，只有每件显形的那一下
+      if (s.dead || k.entries.indexOf(e) < 0) return;
+      if (!(await revealOne(s, k, e))) return;     // 显形后同一刻进入下一件，件与件零间隔
+    }
     if (s.dead) return;
     refreshCounts(); refreshInfo();
   }
@@ -783,14 +804,16 @@ export function createLoot(stage, content, hooks = {}) {
   const endHead = h('div', 'end-head');
   const endTotal = h('div', 'end-total');
   const endLogo = new Image(); endLogo.className = 'end-logo'; endLogo.alt = ''; endLogo.draggable = false; endLogo.src = 'images/logo_mark.png';
-  endHead.append(endLogo, h('div', 'end-title', '行动完成'), endTotal);
+  const endTitle = h('div', 'end-title', '行动完成'); const endSub = h('div', 'end-sub');
+  endHead.append(endLogo, endTitle, endSub, endTotal);
   const endList = h('div', 'end-list');
   makeDragScroll(endList);
   // 两个选项：纪念（主，琥珀色）= 生成纪念图；撤离（次）= 压暗淡出后回封面，全新一局
   const endBtns = h('div', 'end-btns');
   const memoBtn = h('button', 'end-btn memo'); memoBtn.innerHTML = ic('camera') + '<span>纪念</span>'; memoBtn.title = '保存纪念图';
-  const evacBtn = h('button', 'end-btn sec evac'); evacBtn.innerHTML = ic('leave') + '<span>撤离</span>'; evacBtn.title = '撤离，结束这一局';
-  endBtns.append(memoBtn, evacBtn);
+  const backBtn = h('button', 'end-btn sec back'); backBtn.innerHTML = ic('leave') + '<span>返回房间</span>'; backBtn.title = '回到房间继续';
+  const evacBtn = h('button', 'end-btn sec evac'); evacBtn.innerHTML = ic('leave') + '<span>再来一局</span>'; evacBtn.title = '重新开始一局';
+  endBtns.append(memoBtn, backBtn, evacBtn);
   const evacFade = h('div', 'evac-fade');
   endBox.append(endHead, endList, endBtns);
   end.append(confetti, endBox);
@@ -822,7 +845,13 @@ export function createLoot(stage, content, hooks = {}) {
     })(last);
   }
 
-  async function showEnding(items) {
+  let endResolve = null, endMeta = { full: true, found: 0, total: 0 };
+  async function showEnding(items, meta = {}) {
+    endingUp = true; hideBigToast();
+    endMeta = { full: true, found: items.length, total: items.length, ...meta };
+    endTitle.textContent = endMeta.full ? '行动完成' : '已撤离';
+    endSub.textContent = endMeta.full ? '' : '搜出 ' + endMeta.found + '/' + endMeta.total;
+    endSub.style.display = endMeta.full ? 'none' : '';
     const sorted = items.map((it, i) => ({ it, i })).sort((a, b) => (RARITY_KEYS.indexOf(b.it.rarity) - RARITY_KEYS.indexOf(a.it.rarity)) || (a.i - b.i)).map(x => x.it);
     endList.innerHTML = '';
     sorted.forEach(it => {
@@ -840,11 +869,16 @@ export function createLoot(stage, content, hooks = {}) {
     end.classList.remove('hidden');
     requestAnimationFrame(() => end.classList.add('show'));
     runConfetti();
-    audio.settle();
+    if (endMeta.full) audio.settle();      // 只有 13/13 的纪念时刻保留结算和弦
     endLayout = () => { confetti.width = 0; };
     lastSorted = sorted; lastTotal = total;
-    // 撤离不返回：压暗淡出约 0.6 秒后回到封面（整页重新加载 = 全新一局，背包和容器状态都重置）
-    await new Promise(() => {});
+    return new Promise(res => { endResolve = res; });     // 点「返回房间」时 resolve；「再来一局」整页重载
+  }
+  function hideEnding() {
+    endingUp = false;
+    confettiRun = false; closeMemo();
+    end.classList.remove('show');
+    setTimeout(() => end.classList.add('hidden'), 260);
   }
 
   // ---------- 纪念图：canvas 自己画，预览层挂在舞台外面（不受竖屏旋转影响），保存 / 系统分享 / 长按保存 ----------
@@ -863,7 +897,7 @@ export function createLoot(stage, content, hooks = {}) {
     if (memoBtn.disabled) return;
     memoBtn.disabled = true; audio.uiClick();
     try {
-      const cv = await buildMemorial(lastSorted, RARITY, { hasValue, total: lastTotal });
+      const cv = await buildMemorial(lastSorted, RARITY, { hasValue, total: lastTotal, title: endMeta.full ? '行动完成' : '已撤离', sub: endMeta.full ? '' : '搜出 ' + endMeta.found + '/' + endMeta.total });
       const blob = await canvasToBlob(cv);
       closeMemo();
       memoUrl = URL.createObjectURL(blob);
@@ -882,6 +916,7 @@ export function createLoot(stage, content, hooks = {}) {
     memoBtn.disabled = false;
   }
   memoBtn.onclick = openMemo;
+  backBtn.onclick = () => { audio.uiClick(); hideEnding(); const r = endResolve; endResolve = null; if (r) r('room'); };
   evacBtn.onclick = () => {
     audio.uiClick(); evacFade.classList.add('on');
     setTimeout(() => { if (hooks.onEvacuate) hooks.onEvacuate(); else location.reload(); }, 650);
@@ -892,7 +927,7 @@ export function createLoot(stage, content, hooks = {}) {
   return {
     openContainer: id => openPanel('search', id),
     openBag: () => openPanel('bag'),
-    showEnding, showDetail, rootEl: root,
+    showEnding, dim: on => evacFade.classList.toggle('on', !!on), showDetail, confirmExit, showBigToast, rootEl: root,
     status, counts, hasValue,
     bagItems: () => bag.entries.map(e => e.it),
     get isOpen() { return isOpen; },

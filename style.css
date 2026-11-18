@@ -74,6 +74,11 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 @keyframes cvBtnIn { from { opacity: 0; transform: translate3d(-14px, 0, 0); } to { opacity: 1; transform: none; } }
 #cv-msg { font-size: 13px; font-weight: 500; line-height: 1.5; color: #e9c58a; min-height: 0; }
 #cv-msg:empty { display: none; }
+#cv-msg.is-err { font-size: 11px; max-width: 84vw; word-break: break-all; text-align: center; opacity: .9; }
+.cv-btn.is-loading.is-failed { cursor: pointer; font-size: 14px; letter-spacing: 0; }
+.cv-btn.is-loading.is-failed .cv-btn-label { padding-left: 0; }
+.cv-btn.is-loading.is-failed .cv-btn-fill { opacity: 0; }
+.cv-btn.is-loading.is-failed .cv-btn-face { background: #5a2a24; }
 
 /* 右下角：横屏提示 + 声音开关 */
 .cv-foot { position: absolute; right: calc(var(--sa-r) + 10px); bottom: calc(var(--sa-b) + 14px); display: flex; align-items: center; gap: 10px; opacity: 0; animation: cvBtnIn .6s ease-out .9s both; }
@@ -100,8 +105,6 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 .hud-ic { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #progress .hud-ic { color: #f2a21f; width: 20px; height: 20px; }
 #bag-btn { position: absolute; right: var(--sa-r); top: calc(var(--sa-t) + 8px); pointer-events: auto; width: 44px; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 11px; }
-#review-btn { position: absolute; right: calc(var(--sa-r) + 54px); top: calc(var(--sa-t) + 8px); pointer-events: auto; display: none; padding: 9px 14px; font-size: 14px; }
-#review-btn.show { display: block; }
 #search-btn { position: absolute; right: calc(var(--sa-r) + 30px); bottom: calc(var(--sa-b) + 30px); width: 108px; height: 108px; border-radius: 50%; border: 3px solid rgba(255,235,190,.9); background: rgba(242,178,76,.92); color: #2a1a08; font-size: 24px; font-weight: 800; letter-spacing: 3px; padding-left: 3px; pointer-events: auto; display: none; box-shadow: 0 0 24px rgba(242,178,76,.55); }
 #search-btn.show { display: block; animation: sbPulse 1.2s ease-in-out infinite; }
 #search-btn:active { background: #ffd07a; }
@@ -141,7 +144,7 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 @font-face { font-family: LootNum; font-weight: 500; src: url(fonts/BarlowCondensed-Medium.woff2) format("woff2"); font-display: swap; }
 @font-face { font-family: LootNum; font-weight: 600; src: url(fonts/BarlowCondensed-SemiBold.woff2) format("woff2"); font-display: swap; }
 
-.loot, .end, .detail, #hud, .memo-pop {
+.loot, .end, .detail, #hud, .memo-pop, .mp {
   --ink: #d2d3d5; --ink2: #8e9196; --amber: #e38901; --amber2: #f2a21f; --rad: 7px;
   --btn: rgba(44,46,50,.92); --btn-on: rgba(74,77,83,.96);
   font-family: LootSans, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-weight: 500; color: var(--ink);
@@ -216,7 +219,6 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 
 /* ---- 物品格：品质色底（由下到上由浓到淡）+ 底部实色边加外发光 ---- */
 .it { position: absolute; border-radius: var(--rad); touch-action: none; }
-.it.unknown, .it.searching { background: none; pointer-events: none; }
 .it.revealed { cursor: pointer; background: linear-gradient(to top, var(--q0) 0%, var(--q1) 48%, var(--q2) 100%); box-shadow: inset 0 0 0 1px rgba(var(--rgb), .55), 0 3px 8px rgba(0,0,0,.4); }
 .it.r-gold, .it.r-red { background: radial-gradient(120% 70% at 30% 0%, rgba(255,255,255,.16), transparent 55%), linear-gradient(to top, var(--q0) 0%, var(--q1) 48%, var(--q2) 100%); box-shadow: inset 0 0 0 1px rgba(var(--rgb), .9), inset 0 0 14px rgba(var(--rgb), .3), 0 3px 8px rgba(0,0,0,.4); }
 .it .ico { position: absolute; z-index: 1; inset: 0; display: flex; align-items: center; justify-content: center; padding: 4px 3px 8px; pointer-events: none; }
@@ -229,19 +231,13 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 .it.sel { z-index: 3; box-shadow: 0 0 0 2px var(--amber), 0 0 14px rgba(227,137,1,.5); }
 .it.taking { opacity: 0; transition: opacity .05s linear; }
 
-/* ---- 搜索中：细环轨道 + 匀速旋转弧 + 琥珀进度弧 + 放大镜摆动（transform / stroke，60fps） ---- */
-.it .srch { position: absolute; inset: 0; --ring: calc(var(--ms) * .62); }
-.it .srch .ring, .it .srch .spin { position: absolute; left: 50%; top: 50%; width: var(--ring); height: var(--ring); margin: calc(var(--ring) / -2) 0 0 calc(var(--ring) / -2); transform: rotate(-90deg); overflow: visible; }
-.it .srch circle { fill: none; stroke-linecap: round; }
-.it .srch .trk { stroke: rgba(210,211,213,.18); stroke-width: 2.2; }
-.it .srch .prg { stroke: var(--amber); stroke-width: 3; stroke-dasharray: 100; stroke-dashoffset: 100; animation: srchFill var(--dur) linear forwards; }
-.it .srch .spin { animation: srchSpin 1.1s linear infinite; }
-.it .srch .spin circle { stroke: rgba(210,211,213,.6); stroke-width: 2.6; stroke-dasharray: 14 86; }
-.it .mag { position: absolute; left: 50%; top: 50%; width: calc(var(--ms) * .34); height: calc(var(--ms) * .34); margin: calc(var(--ms) * -.17) 0 0 calc(var(--ms) * -.17); color: var(--ink); animation: magSway 1.8s ease-in-out infinite; }
-.it .mag .ic { width: 100%; height: 100%; }
-@keyframes srchFill { to { stroke-dashoffset: 0; } }
-@keyframes srchSpin { to { transform: rotate(270deg); } }
-@keyframes magSway { 0%, 100% { transform: rotate(-9deg); } 50% { transform: rotate(9deg); } }
+/* ---- 搜索中：正在搜的那一件按最终占格大小露出一块深色斜纹底（比空格更黑），正中一个静止的白色放大镜（高约单格宽的 45%）；
+        还没轮到的件不显示（仍是空格）。放大镜没有任何动画、进度环或虚线圈 ---- */
+.it.unknown { background: none; pointer-events: none; }
+.it.searching { background: repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 2px, rgba(255,255,255,0) 2px 7px), #0d0e10; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); pointer-events: none; }
+.it .srch { position: absolute; inset: 0; }
+.it .mag { position: absolute; left: 50%; top: 50%; width: calc(var(--cs) * .45); height: calc(var(--cs) * .45); margin: calc(var(--cs) * -.225) 0 0 calc(var(--cs) * -.225); color: #fff; }
+.it .mag .ic { width: 100%; height: 100%; stroke-width: 2.2; }
 
 /* ---- 显形动画：24 帧（0.4 秒），逐帧对应 loot_spec 第 4 节，用新品质色 ----
    帧0 品质色实心；帧1~2 泛白；帧3 图出现+亮白描边；帧4~6 满色底+外扩光晕；帧7 起名字数字；帧9~24 褪回静止态 */
@@ -348,3 +344,60 @@ button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
 .memo-hint { font-size: 12px; color: var(--ink2); letter-spacing: 2px; }
 .memo-btns { display: flex; gap: 12px; }
 .memo-btns .end-btn { min-width: 108px; }
+
+/* ---- 撤离流程：提示条、确认框、按钮模式、进度闪烁 ---- */
+.exit-toast { position: absolute; left: 50%; top: calc(var(--sa-t) + 56px); transform: translateX(-50%); z-index: 80; padding: 9px 20px; background: rgba(24,25,28,.92); border-radius: var(--rad); box-shadow: inset 0 0 0 1px rgba(227,137,1,.6), 0 4px 18px rgba(0,0,0,.45); color: #f1e6cf; font-size: 15px; font-weight: 700; letter-spacing: 2px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .35s; }
+.exit-toast.on { opacity: 1; }
+.exit-confirm { position: absolute; inset: 0; z-index: 85; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
+.exit-confirm.hidden { display: none; }
+.ec-box { background: #1b1c1f; border-radius: var(--rad); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12), 0 8px 30px rgba(0,0,0,.6); padding: 20px 26px 16px; display: flex; flex-direction: column; gap: 14px; max-width: 86%; }
+.ec-msg { font-size: 16px; font-weight: 700; color: #e6e7e9; text-align: center; letter-spacing: 1px; }
+.ec-box .end-btn { min-width: 110px; padding: 0 18px; letter-spacing: 2px; }
+.end-sub { font-size: 15px; font-weight: 600; letter-spacing: 2px; color: #b8bbbf; align-self: flex-end; padding-bottom: 4px; }
+#progress.flash { animation: pnFlash .45s ease-in-out 6; }
+@keyframes pnFlash { 0%, 100% { transform: scale(1); filter: none; } 50% { transform: scale(1.22); filter: drop-shadow(0 0 8px rgba(227,137,1,.9)) brightness(1.3); } }
+#hud #search-btn.show.m-exit { flex-direction: column; gap: 0; }
+#hud #search-btn .btn-lb { font-size: 12px; line-height: 1; font-weight: 800; letter-spacing: 2px; margin-top: 1px; color: #1a1100; }
+@media (max-width: 700px) { .end-btns { gap: 8px; flex-wrap: wrap; } .end-btn { min-width: 96px; padding: 0 14px; } }
+
+/* ---- 音响面板 ---- */
+.mp { position: absolute; inset: 0; z-index: 70; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .16s; }
+.mp.show { opacity: 1; }
+.mp-box { width: min(300px, calc(100% - 32px)); max-height: calc(100% - 24px); overflow: auto; background: #1b1c1f; border-radius: var(--rad); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12), 0 8px 30px rgba(0,0,0,.6); padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; color: var(--ink); }
+.mp-head { display: flex; align-items: center; justify-content: space-between; min-height: 40px; }
+.mp-ttl { font-size: 16px; font-weight: 700; letter-spacing: 4px; color: #e6e7e9; padding-left: 2px; }
+.mp-x { width: 40px; height: 40px; border: 0; border-radius: var(--rad); background: var(--btn); color: var(--ink); display: flex; align-items: center; justify-content: center; padding: 0; }
+.mp-x svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.mp-list { display: flex; flex-direction: column; gap: 4px; }
+.mp-row { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 10px; border: 0; border-radius: var(--rad); background: rgba(255,255,255,.05); color: var(--ink); font-size: 14px; text-align: left; }
+.mp-row.cur { background: rgba(227,137,1,.16); box-shadow: inset 0 0 0 1px rgba(227,137,1,.55); color: #f4e6c8; }
+.mp-row.err .mp-t { color: #ff9c7a; }
+.mp-n { width: 16px; font-size: 13px; color: var(--ink2); text-align: center; }
+.mp-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; width: 16px; }
+.mp-bars i { flex: 1; background: var(--amber2); height: 30%; border-radius: 1px; }
+.mp-bars.on i { animation: mpBar .9s ease-in-out infinite; }
+.mp-bars.on i:nth-child(2) { animation-delay: -.3s; }
+.mp-bars.on i:nth-child(3) { animation-delay: -.6s; }
+@keyframes mpBar { 0%, 100% { height: 25%; } 50% { height: 100%; } }
+.mp-sp { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.2); border-top-color: var(--amber2); animation: mpSp .8s linear infinite; }
+@keyframes mpSp { to { transform: rotate(360deg); } }
+.mp-empty { padding: 18px 0; text-align: center; font-size: 14px; color: var(--ink2); letter-spacing: 2px; }
+.mp-ctl { display: flex; justify-content: center; gap: 12px; padding-top: 2px; }
+.mp-b { width: 48px; height: 44px; border: 0; border-radius: var(--rad); background: var(--btn); color: var(--ink); display: flex; align-items: center; justify-content: center; padding: 0; }
+.mp-b svg { width: 22px; height: 22px; }
+.mp-b:disabled { opacity: .4; }
+.mp-pp { width: 64px; background: var(--amber); color: #fff; }
+.mp-pp svg { width: 26px; height: 26px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.45)); }
+.mp-b:active { background: var(--btn-on); }
+.mp-pp:active { background: #c97800; }
+.mp-vol { display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.mp-vi { width: 22px; height: 22px; color: var(--ink2); display: flex; }
+.mp-vi svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.mp-rng { flex: 1; height: 40px; margin: 0; background: transparent; -webkit-appearance: none; appearance: none; }
+.mp-rng::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--amber) var(--p, 70%), rgba(255,255,255,.16) var(--p, 70%)); }
+.mp-rng::-moz-range-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,.16); }
+.mp-rng::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--amber); }
+.mp-rng::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; margin-top: -8px; border-radius: 50%; background: #f1f2f3; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.mp-rng::-moz-range-thumb { width: 22px; height: 22px; border: 0; border-radius: 50%; background: #f1f2f3; }
+#hud #search-btn.m-music .hud-ic { width: 38px; height: 38px; }

@@ -26,7 +26,7 @@ const fmtV = n => { const r = Math.round(n * 10) / 10; return Number.isInteger(r
 
 // items: 已排好序的物品；RARITY: loot.js 的品质色表；返回 canvas
 export async function buildMemorial(items, RARITY, opts) {
-  const { hasValue, total, title = '行动完成', logoSrc = 'images/logo.webp', date = new Date() } = opts;
+  const { hasValue, total, title = '行动完成', sub = '', logoSrc = 'images/logo.webp', date = new Date() } = opts;
   try {   // 确保用的字体已加载（和页面是同一套）
     await Promise.all(['700 30px LootSans', '500 24px LootSans', '600 40px LootNum'].map(f => document.fonts.load(f, '行动完成腾诞日0123456789')));
   } catch (e) { /* 静默 */ }
@@ -45,6 +45,7 @@ export async function buildMemorial(items, RARITY, opts) {
   ctx.fillStyle = '#e6e7e9'; ctx.font = '700 64px ' + FONT; ctx.textAlign = 'right';
   ctx.fillText(title, W - PAD, 130);
   ctx.fillStyle = '#e38901'; ctx.fillRect(W - PAD - 220, 152, 220, 5);
+  if (sub) { ctx.fillStyle = '#b8bbbf'; ctx.font = '600 34px ' + FONT; ctx.fillText(sub, W - PAD, 196); }
   ctx.textAlign = 'left';
   // 物品格：5 列 x 3 行；最后一行剩下的位置放总价值和日期
   const COLS = 5, GX = 18, GY = 18, gx0 = PAD, gy0 = 214;

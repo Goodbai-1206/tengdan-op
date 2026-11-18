@@ -4,11 +4,14 @@
 // 容器对应：desk=沙发上的衣服堆，wardrobe=衣柜（东侧一对门），chest=床头柜抽屉。
 import * as THREE from '../lib/three.module.js';
 import { GLTFLoader } from '../lib/jsm/loaders/GLTFLoader.js';
+import { diag, showFatal } from './diag.js';
 
 export const ROOM = { x0: -2.75, x1: 2.75, z0: -2.25, z1: 2.25, h: 2.7 };
 export const PLAYER_R = 0.2;   // 床尾与沙发之间的缝只有约 0.48m，半径 0.26 会把整个北半屋隔成孤岛
 export const EYE_H = 1.6;
 export const PLAYER_START = { x: -2.15, z: 1.4, yaw: -0.85, pitch: 0 };   // 西墙门内，朝东北看向房间中央（床一角、衣柜、沙发、窗同时入画）
+
+export const EXIT_POINT = { x: -2.43, z: 1.4, r: 1.0 };   // 门垫中心（门内侧）；半径内可点「撤离」
 
 const ASSET_BASE = 'assets/room/';
 
@@ -133,25 +136,97 @@ function buildExt(W, H) {
   return { scene: ext, camera: extCam, winPos, glow };
 }
 
-// ---------- 下载（带进度）----------
+// ---------- 下载（带进度、可重试）----------
+const Q0 = new URLSearchParams(location.search);
+const STALL_MS = Number(Q0.get('stall')) || 20000;   // 单个文件这么久没收到新数据就中止重下（测试时可用 ?stall=毫秒 缩短）
+const TRIES = 3, BACKOFF = [800, 2500];
+const fileCache = new Map();   // 下载成功或进行中的文件：文件名 -> Promise<ArrayBuffer>；失败的会被清掉，重试时重新下
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const shortName = u => String(u).split('/').pop();
+async function fetchOnce(url, onBytes) {
+  const ac = new AbortController(); let timer;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => ac.abort(), STALL_MS); };
+  try {
+    arm();
+    const r = await fetch(url, { signal: ac.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    arm();
+    if (!r.body || !r.body.getReader) { const b = await r.arrayBuffer(); onBytes(b.byteLength); return b; }
+    const reader = r.body.getReader();
+    const chunks = []; let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      arm(); chunks.push(value); got += value.length; onBytes(got);
+    }
+    const buf = new Uint8Array(got); let o = 0;
+    for (const c of chunks) { buf.set(c, o); o += c.length; }
+    return buf.buffer;
+  } catch (e) {
+    if (ac.signal.aborted) throw new Error(Math.round(STALL_MS / 1000) + ' 秒没有收到新数据');
+    throw e;
+  } finally { clearTimeout(timer); }
+}
 async function fetchBytes(url, size, onBytes) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('下载失败 ' + url + ' ' + r.status);
-  const reader = r.body.getReader();
-  const chunks = []; let got = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value); got += value.length; onBytes(got);
+  const name = shortName(url); let last;
+  for (let a = 1; a <= TRIES; a++) {
+    onBytes(0);   // 重试时该文件的进度先归零再涨
+    try {
+      diag('下载 ' + name + ' 第' + a + '次');
+      const b = await fetchOnce(url, onBytes);
+      onBytes(size || b.byteLength);
+      diag('完成 ' + name + ' ' + b.byteLength + 'B');
+      return b;
+    } catch (e) {
+      last = e; diag('失败 ' + name + ' 第' + a + '次：' + (e && e.message));
+      if (a < TRIES) await wait(BACKOFF[a - 1]);
+    }
   }
-  onBytes(size || got);
-  const buf = new Uint8Array(got); let o = 0;
-  for (const c of chunks) { buf.set(c, o); o += c.length; }
-  return buf.buffer;
+  onBytes(0);
+  const err = new Error(name + '：' + (last && last.message)); err.file = name; err.reason = String(last && last.message); throw err;
+}
+function getBytes(url, size, onBytes) {
+  if (!fileCache.has(url)) {
+    const p = fetchBytes(url, size, onBytes);
+    fileCache.set(url, p); p.catch(() => { if (fileCache.get(url) === p) fileCache.delete(url); });
+  }
+  return fileCache.get(url);
+}
+// 带选项的 createImageBitmap 在旧版 iOS Safari 上会直接抛错：先探一次，不行就走 <img> 解码，翻转方向与原来保持一致
+let bitmapOptsOk = null;
+async function probeBitmapOpts() {
+  if (bitmapOptsOk !== null) return bitmapOptsOk;
+  try {
+    if (typeof createImageBitmap !== 'function') throw new Error('无 createImageBitmap');
+    const c = document.createElement('canvas'); c.width = c.height = 2;
+    const b = await createImageBitmap(c, { imageOrientation: 'flipY', premultiplyAlpha: 'none' });
+    if (b.close) b.close();
+    bitmapOptsOk = true;
+  } catch (e) { bitmapOptsOk = false; diag('createImageBitmap 带选项不可用：' + (e && e.message) + '，改用 <img> 解码'); }
+  return bitmapOptsOk;
+}
+async function decodeImage(buf, flipY, name) {
+  const blob = new Blob([buf], { type: 'image/jpeg' });
+  if (await probeBitmapOpts()) {
+    try { const bmp = await createImageBitmap(blob, { imageOrientation: flipY ? 'flipY' : 'none', premultiplyAlpha: 'none' }); diag('解码 ' + name + ' bitmap'); return bmp; }
+    catch (e) { diag('bitmap 解码失败 ' + name + '：' + (e && e.message) + '，改用 <img>'); }
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const im = new Image();
+    await new Promise((res, rej) => { im.onload = res; im.onerror = () => rej(new Error('图片解码失败')); im.src = url; });
+    diag('解码 ' + name + ' img' + (flipY ? '+翻转' : ''));
+    if (!flipY) return im;
+    const cv = document.createElement('canvas'); cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+    const g = cv.getContext('2d'); g.translate(0, cv.height); g.scale(1, -1); g.drawImage(im, 0, 0);
+    return cv;
+  } finally { URL.revokeObjectURL(url); }
 }
 async function loadTex(renderer, file, size, onBytes, { srgb = true, flipY = false, equirect = false } = {}) {
-  const buf = await fetchBytes(ASSET_BASE + file, size, onBytes);
-  const bmp = await createImageBitmap(new Blob([buf], { type: 'image/jpeg' }), { imageOrientation: flipY ? 'flipY' : 'none', premultiplyAlpha: 'none' });
+  const buf = await getBytes(ASSET_BASE + file, size, onBytes);
+  let bmp;
+  try { bmp = await decodeImage(buf, flipY, file); }
+  catch (e) { fileCache.delete(ASSET_BASE + file); const err = new Error(file + '：' + (e && e.message)); err.file = file; err.reason = String(e && e.message); throw err; }
   const t = new THREE.Texture(bmp);
   t.flipY = false;
   t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
@@ -198,7 +273,12 @@ export function createWorld(host, W, H) {
     desk: {
       id: 'desk', access: { x: 1.22, z: 1.05 }, stand: { x: 1.2, z: 1.95, yaw: 0, pitch: -0.82 },
       marker: makeMarker(1.22, 1.05, 1.0), dur: 0.7, p: 0, dir: 0, searched: false,
-      apply(p) { rot('clothes_top', 'x', 100, easeOut(p)); },
+      // 翻开：最上面的卫衣南端被掀起、甩到靠背上；针织衫被拨到一边（向西南滑开）
+      apply(p) {
+        const e = easeOut(p);
+        rot('clothes_top', 'x', -66, e);
+        const k = parts.clothes_knit; if (k) { k.position.x = closed.clothes_knit.p.x - 0.28 * e; k.position.z = closed.clothes_knit.p.z + 0.12 * e; }
+      },
     },
     // 衣柜东侧一对门：各自绕外侧合页向外开约 95 度
     wardrobe: {
@@ -238,12 +318,15 @@ export function createWorld(host, W, H) {
   function setMarkersVisible(v) { Object.values(containers).forEach(c => { c.marker.g.visible = false; }); }
 
   // ===== 准星对准描边：遮罩描边（把目标网格以纯白画进半分辨率的离屏遮罩，后期里取遮罩边缘外扩 2~3px 输出白边；只在有目标时才画遮罩）=====
-  const AIM_PARTS = { desk: ['clothes_top', 'clothes_base'], wardrobe: ['wd_door_b_l', 'wd_door_b_r'], chest: ['nightstand_drawer'] };
+  // 描边对象：整件家具的外轮廓（衣柜 = 全部柜门和柜体，床头柜 = 柜体 + 抽屉面板，衣服堆 = 三块衣服）；被别的物体挡住的部分不进遮罩
+  const AIM_PARTS = { desk: ['clothes_top', 'clothes_base', 'clothes_knit'], wardrobe: ['wd_door_b_l', 'wd_door_b_r', 'ai_wardrobe'], chest: ['nightstand_drawer', 'ns_ai_body'], speaker: ['speaker_mini'] };
+  const speakerLed = { mat: null, on: null, lit: false, pulse: 0 };
   const outlines = {};            // id -> { a, target, hint, dim }
   const aimMeshes = [];           // 被射线检测的原网格
   const maskClones = {};          // id -> [{ src, clone }]
   const maskScene = new THREE.Scene();
-  const maskMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false, fog: false });
+  const maskMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false, fog: false, depthFunc: THREE.LessEqualDepth });
+  const occMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true });   // 遮罩前的深度预渲染：整个房间只写深度，用来挡住藏在柜体里面的部分
   const raycaster = new THREE.Raycaster();
   const _ndc = new THREE.Vector2();
   let maskRT = null;
@@ -262,6 +345,29 @@ export function createWorld(host, W, H) {
         });
       }
     }
+    // 衣服堆、衣柜、床头柜：各加一个包住整件的看不见的命中盒（只参与对准射线，不画、不进描边遮罩），
+    // 免得准星刚好落在布料网格的缝里、或抽屉缝上时对不中
+    for (const id of ['desk', 'wardrobe', 'chest']) {
+      const bb = new THREE.Box3(); let any = false;
+      for (const n of AIM_PARTS[id]) { const part = parts[n]; if (!part) continue; part.updateMatrixWorld(true); bb.expandByObject(part); any = true; }
+      if (!any) continue;
+      bb.expandByScalar(0.03);
+      const sz = bb.getSize(new THREE.Vector3()), ct = bb.getCenter(new THREE.Vector3());
+      const px = new THREE.Mesh(new THREE.BoxGeometry(sz.x, sz.y, sz.z), new THREE.MeshBasicMaterial({ visible: false }));
+      px.position.copy(ct); px.updateMatrixWorld(true); px.userData.aimId = id; px.userData.noOcc = true; px.name = 'aimproxy_' + id; scene.add(px); aimMeshes.push(px);
+    }
+    // 音响只有 9 厘米宽：加一个看不见的略大的射线命中盒，准星不用瞄得那么准（只参与射线，不画、不进遮罩）
+    if (parts.speaker_mini) {
+      const px = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.17, 0.2), new THREE.MeshBasicMaterial({ visible: false }));
+      parts.speaker_mini.getWorldPosition(px.position); px.position.y += 0.04;
+      px.updateMatrixWorld(true); px.userData.aimId = 'speaker'; px.userData.noOcc = true; scene.add(px); aimMeshes.push(px);
+    }
+  }
+  // 音响：随节拍微缩放（底面不动）、指示灯只在播放时亮
+  function setSpeaker(playing, level) {
+    const o = parts.speaker_mini;
+    if (o) { const k = 1 + 0.018 * (playing ? level : 0); o.scale.set(k, k, k); }
+    if (speakerLed.mat && speakerLed.lit !== !!playing) { speakerLed.lit = !!playing; speakerLed.mat.color.copy(playing ? speakerLed.on : new THREE.Color(0.05, 0.1, 0.07)); }
   }
   // 从屏幕 NDC 点发射线：命中可搜索容器且距离在 maxDist 内 -> { id, dist }
   function pickAt(nx, ny, maxDist) {
@@ -286,9 +392,9 @@ export function createWorld(host, W, H) {
     let best = null, ba = 0.01;
     for (const id in outlines) { const al = outlineAlpha(id); if (al > ba) { ba = al; best = id; } }
     if (!best) return null;
-    if (!maskRT || maskRT.width !== Math.max(2, size.x >> 1) || maskRT.height !== Math.max(2, size.y >> 1)) {
+    if (!maskRT || maskRT.width !== Math.max(2, size.x) || maskRT.height !== Math.max(2, size.y)) {
       if (maskRT) maskRT.dispose();
-      maskRT = new THREE.WebGLRenderTarget(Math.max(2, size.x >> 1), Math.max(2, size.y >> 1), { depthBuffer: true });
+      maskRT = new THREE.WebGLRenderTarget(Math.max(2, size.x), Math.max(2, size.y), { depthBuffer: true, samples: 4 });   // 全分辨率 + 4 倍多重采样：斜边不出台阶
       postMat.uniforms.tMask.value = maskRT.texture;
     }
     for (const id in maskClones) for (const m of maskClones[id]) {
@@ -296,8 +402,36 @@ export function createWorld(host, W, H) {
       m.clone.visible = on;
       if (on) { m.src.updateWorldMatrix(true, false); m.clone.matrix.copy(m.src.matrixWorld); m.clone.matrixWorld.copy(m.src.matrixWorld); }
     }
-    renderer.setRenderTarget(maskRT); renderer.clear(); renderer.render(maskScene, camera); renderer.setRenderTarget(null);
+    renderer.setRenderTarget(maskRT); renderer.clear();
+    const ac = renderer.autoClear; renderer.autoClear = false;
+    const bgSave = scene.background, hidden = [];
+    scene.traverse(o => { if (o.userData.noOcc && o.visible) { o.visible = false; hidden.push(o); } });   // 光晕、窗外夜景、地面暗斑不参与遮挡
+    scene.background = null; scene.overrideMaterial = occMat;
+    renderer.render(scene, camera);
+    scene.overrideMaterial = null; scene.background = bgSave; hidden.forEach(o => { o.visible = true; });
+    renderer.render(maskScene, camera);
+    renderer.autoClear = ac; renderer.setRenderTarget(null);
     return { alpha: ba, dim: outlines[best].dim };
+  }
+
+  // 楼梯口：平台南沿的竖面在烘焙导出时被当成"看不见的面"剔掉了，从楼梯下方往上看会透出夜空。这里在平台实体内侧补一块不受光的深色盒子，
+  // 盒子顶面比地面低 4mm（被地面盖住），只有那条缺面的缝能看到它。只是视觉遮挡，不参与碰撞、对准、描边。
+  function addStairFiller() {
+    const mat = new THREE.MeshBasicMaterial({ color: 0x1d1814, side: THREE.DoubleSide });
+    const XW = -5.65, XC0 = -4.55, ZTOP = 1.75;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(XC0 - 0.05 - XW - 0.04, 1.3, ZTOP + 0.004 - 0.2), mat);
+    m.position.set((XW + 0.02 + XC0 - 0.05 - 0.02) / 2, -0.004 - 0.65, (0.2 + ZTOP + 0.004) / 2);
+    m.name = 'stair_filler'; scene.add(m);
+    // 梯级内部和路缘：被剔掉的还有梯级侧面、路缘顶面，同样在实体里面补深色块（顶面都比可见面低 4mm）
+    const H_ST = 0.17, D_ST = 0.27, NST = 6;
+    for (let k = 1; k <= NST; k++) {
+      const top = -k * H_ST - 0.004, bot = -(NST + 1) * H_ST - 0.1;
+      const x0 = XW - 0.1, x1 = XC0 - 0.02, z0 = ZTOP + (k - 1) * D_ST - 0.03, z1 = ZTOP + k * D_ST;   // 两侧伸进墙和路缘、向上一级方向伸进相邻梯级，盖住接缝
+      const st = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, top - bot, z1 - z0), mat);
+      st.position.set((x0 + x1) / 2, (top + bot) / 2, (z0 + z1) / 2); st.name = 'stair_filler_' + k; scene.add(st);
+    }
+    const cu = new THREE.Mesh(new THREE.BoxGeometry(0.075, (NST + 1) * H_ST - 0.01, 4.8 - ZTOP), mat);
+    cu.position.set(XC0 - 0.0115, -0.004 - ((NST + 1) * H_ST - 0.01) / 2, (ZTOP + 4.8) / 2); cu.name = 'stair_filler_curb'; scene.add(cu);
   }
 
   // ===== 加载 =====
@@ -306,16 +440,21 @@ export function createWorld(host, W, H) {
   let frac = 0;
   const bump = (k) => (n) => { loaded.set(k, n); let l = 0; for (const v of loaded.values()) l += v; frac = Math.min(1, l / totalBytes); progressCbs.forEach(f => f(frac)); };
   const stats = { ready: false, loadMs: 0 };
+  let built = false;
   const t0 = performance.now();
 
   async function load() {
-    const manifest = await (await fetch(ASSET_BASE + 'manifest.json')).json();
+    diag('开始加载');
+    let manifest;
+    try { manifest = JSON.parse(new TextDecoder().decode(await getBytes(ASSET_BASE + 'manifest.json', 0, () => {}))); }
+    catch (e) { if (e && e.file) throw e; fileCache.delete(ASSET_BASE + 'manifest.json'); const err = new Error('manifest.json：' + (e && e.message)); err.file = 'manifest.json'; err.reason = String(e && e.message); throw err; }
     totalBytes = manifest.totalBytes;
-    const glbP = fetchBytes(ASSET_BASE + manifest.glb.file, manifest.glb.bytes, bump('glb'));
+    const glbP = getBytes(ASSET_BASE + manifest.glb.file, manifest.glb.bytes, bump('glb'));
     const lmP = Object.entries(manifest.lm).map(([k, v]) => loadTex(renderer, v.file, v.bytes, bump('lm' + k)).then(t => [k, t, v.scale]));
     const skyP = loadTex(renderer, manifest.sky.file, manifest.sky.bytes, bump('sky'), { flipY: true, equirect: true });
-    const lmBP = manifest.lmB ? loadTex(renderer, manifest.lmB.file, manifest.lmB.bytes, bump('lmB')) : null;
-    const [glbBuf, lms, sky, lmB] = await Promise.all([glbP, Promise.all(lmP), skyP, lmBP]);
+    const lmBP = manifest.lmB ? Object.entries(manifest.lmB).map(([a, v]) => loadTex(renderer, v.file, v.bytes, bump('lmB' + a)).then(t => [a, t])) : [];   // 楼道各图集「门开着」版光照图
+    const [glbBuf, lms, sky, lmBl] = await Promise.all([glbP, Promise.all(lmP), skyP, Promise.all(lmBP)]);
+    const lmBs = Object.fromEntries(lmBl);
 
     scene.background = sky;
     scene.backgroundIntensity = manifest.sky.scale * Number(Q.get('bgi') || 1);
@@ -325,7 +464,16 @@ export function createWorld(host, W, H) {
     scene.environmentIntensity = Number(Q.get('envi') || 1.0);
     pm.dispose(); et.dispose();
 
-    const gltf = await new Promise((res, rej) => new GLTFLoader().parse(glbBuf, ASSET_BASE, res, rej));
+    diag('解析 room.glb');
+    // GLTFLoader 在构造解析器时按全局 createImageBitmap 是否存在决定贴图加载方式；带选项的调用不可用时，临时让它走 <img> 路径
+    const bmpOk = await probeBitmapOpts();
+    const gltf = await new Promise((res, rej) => {
+      const savedCIB = window.createImageBitmap;
+      if (!bmpOk) window.createImageBitmap = undefined;
+      try { new GLTFLoader().parse(glbBuf, ASSET_BASE, res, rej); } catch (e) { rej(e); }
+      finally { window.createImageBitmap = savedCIB; }
+    }).catch(e => { fileCache.delete(ASSET_BASE + manifest.glb.file); const err = new Error(manifest.glb.file + '：' + (e && e.message || e)); err.file = manifest.glb.file; err.reason = String(e && e.message || e); throw err; });
+    diag('room.glb 解析完成');
     const lmMap = {};
     for (const [k, t, s] of lms) { lmMap[k] = { t, s }; }   // 颜色图与光照图共用同一套 UV（UV0）
     const gain = Number(Q.get('lm') || 1);
@@ -333,10 +481,22 @@ export function createWorld(host, W, H) {
     const AI_MAT = { sofa: { r: 0.38, env: 1.0 }, bed: { r: 0.9, env: 0.3 }, chair: { r: 0.6, env: 0.5 }, dog: { r: 0.95, env: 0.2 }, wardrobe: { r: 0.7, env: 0.5 }, nightstand: { r: 0.6, env: 0.5 } };   // 各件 AI 家具的粗糙度和环境反射强度
     const CORF_K = Number(Q.get('ck') || 0.45).toFixed(3), CORF_REF = (1 + Number(Q.get('ck') || 0.45) * 2.56).toFixed(3);   // 楼道距离衰减：K 越大越暗得快；REF 让 1.6 米处亮度不变
     const done = new Set();
+    // 楼道专用环境反射：偏暗的暖灰环境 + 天花上的灯 + 地平线一圈被灯照亮的对面墙，让半亮漆面的门和五金有柔和的高光带
+    const corEnvTex = (() => {
+      const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const g = cv.getContext('2d');
+      const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, '#6b5f4c'); gr.addColorStop(0.42, '#8a7a62'); gr.addColorStop(0.55, '#7d6f58'); gr.addColorStop(1, '#2a2620');
+      g.fillStyle = gr; g.fillRect(0, 0, 512, 256);
+      const blob = (x, y, r, a, c) => { const rg = g.createRadialGradient(x, y, 0, x, y, r); rg.addColorStop(0, 'rgba(' + c + ',' + a + ')'); rg.addColorStop(1, 'rgba(' + c + ',0)'); g.fillStyle = rg; g.fillRect(x - r, y - r, r * 2, r * 2); };
+      blob(256, 18, 90, 1.0, '255,226,170'); blob(60, 118, 70, 0.55, '255,214,160'); blob(300, 120, 90, 0.5, '255,222,176'); blob(440, 122, 60, 0.4, '255,210,150');
+      const t = new THREE.CanvasTexture(cv); t.mapping = THREE.EquirectangularReflectionMapping; t.colorSpace = THREE.SRGBColorSpace;
+      const pm2 = new THREE.PMREMGenerator(renderer); const r = pm2.fromEquirectangular(t).texture; pm2.dispose(); t.dispose(); return r;
+    })();
+    const CORR = new Set(['5', '8', '9']);   // 楼道三个图集：5 墙和邻居门，8 地面/梯级/天花/栏杆，9 302 门板和五金
     // 走廊图集（含房门）有两张光照图：关门版 / 开门版，按开门进度混合
-    const blendMat = m => {
+    const blendMat = (m, lmBtex, fall) => {
+      const FALL = fall ? 'corFall(vWPos)' : '1.0';
       m.onBeforeCompile = sh => {
-        sh.uniforms.lightMap2 = { value: lmB }; sh.uniforms.uOpen = doorOpenU; sh.uniforms.uLamp = { value: new THREE.Vector3(-3.75, 2.3, 1.4) };
+        sh.uniforms.lightMap2 = { value: lmBtex }; sh.uniforms.uOpen = doorOpenU; sh.uniforms.uLamp = { value: new THREE.Vector3(-3.75, 2.3, 1.4) };
         const NL = String.fromCharCode(10);
         // 楼道：在光照图之外再按「到楼道灯的距离」做平方反比式的明暗过渡（灯下亮，两端、墙角、天花板边缘暗），平均亮度不变
         sh.vertexShader = sh.vertexShader
@@ -344,9 +504,9 @@ export function createWorld(host, W, H) {
           .replace('#include <begin_vertex>', '#include <begin_vertex>' + NL + 'vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         sh.fragmentShader = sh.fragmentShader
           .replace('#include <lightmap_pars_fragment>', '#include <lightmap_pars_fragment>' + NL + 'uniform sampler2D lightMap2;' + NL + 'uniform float uOpen;' + NL + 'uniform vec3 uLamp;' + NL + 'varying vec3 vWPos;' + NL + 'float corFall(vec3 p) { float d = distance(p, uLamp); return clamp(' + CORF_REF + ' / (1.0 + ' + CORF_K + ' * d * d), 0.0, 2.2); }')
-          .replace('#include <lights_fragment_maps>', THREE.ShaderChunk.lights_fragment_maps.replace('vec3 lightMapIrradiance = lightMapTexel.rgb * lightMapIntensity;', 'vec3 lightMapIrradiance = mix(lightMapTexel.rgb, texture2D(lightMap2, vLightMapUv).rgb, uOpen) * lightMapIntensity * corFall(vWPos);'));   // 注意：onBeforeCompile 时 include 还没展开，要把 chunk 取出来再替换
+          .replace('#include <lights_fragment_maps>', THREE.ShaderChunk.lights_fragment_maps.replace('vec3 lightMapIrradiance = lightMapTexel.rgb * lightMapIntensity;', 'vec3 lightMapIrradiance = mix(lightMapTexel.rgb, texture2D(lightMap2, vLightMapUv).rgb, uOpen) * lightMapIntensity * ' + FALL + ';'));   // 注意：onBeforeCompile 时 include 还没展开，要把 chunk 取出来再替换
       };
-      m.customProgramCacheKey = () => 'lmBlend';
+      m.customProgramCacheKey = () => 'lmBlend' + (fall ? 'F' : 'N');
     };
     gltf.scene.traverse(o => {
       if (!o.isMesh) return;
@@ -356,6 +516,25 @@ export function createWorld(host, W, H) {
         if (m.name.startsWith('em_')) {
           // 自发光物体不受光照图影响，直接显示基色
           const nm = new THREE.MeshBasicMaterial({ color: m.color.clone(), side: THREE.DoubleSide }); nm.name = m.name;
+          if (/^em_shade_glow/.test(m.name)) {
+            const gb = o.geometry; gb.computeBoundingBox();
+            const uni = { uY0: { value: gb.boundingBox.min.y }, uY1: { value: gb.boundingBox.max.y }, uBoost: { value: Number(Q.get('shade') || 1.0) } };
+            nm.onBeforeCompile = sh => {
+              Object.assign(sh.uniforms, uni);
+              sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vWp; varying vec3 vWn;')
+                .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWp = (modelMatrix * vec4(transformed, 1.0)).xyz; vWn = normalize(mat3(modelMatrix) * normal);');
+              sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vWp; varying vec3 vWn; uniform float uY0; uniform float uY1; uniform float uBoost;')
+                .replace('#include <dithering_fragment>', `
+                  float gt = clamp((vWp.y - uY0) / max(uY1 - uY0, 0.001), 0.0, 1.0);
+                  float vdn = abs(dot(normalize(vWn), normalize(cameraPosition - vWp)));
+                  float gk = mix(1.35, 0.55, gt) * (0.7 + 0.45 * pow(vdn, 1.3));
+                  gl_FragColor.rgb *= gk * uBoost;
+                  gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(1.0, 0.86, 0.62), 0.35 * gt);
+                  #include <dithering_fragment>`);
+            };
+            nm.customProgramCacheKey = () => 'shadeGlow';
+          }
+          if (m.name === 'em_speaker_led') { speakerLed.mat = nm; speakerLed.on = nm.color.clone(); nm.color.setRGB(0.05, 0.1, 0.07); }   // 指示灯只在播放时亮
           o.material = Array.isArray(o.material) ? o.material.map(x => x === m ? nm : x) : nm;
           return;
         }
@@ -379,17 +558,28 @@ export function createWorld(host, W, H) {
           if (k[2] === 'semi' || k[2] === 'leather') m.roughness = Math.min(m.roughness, 0.42);   // leather 桶（黑皮沙发）暂与 semi 同参数，校色待定
           m.envMapIntensity = ENV_I[k[2] === 'leather' ? 'semi' : k[2]] != null ? ENV_I[k[2] === 'leather' ? 'semi' : k[2]] : 0.5;
           if (k[1] === '6') { m.color.setRGB(1.0, Number(Q.get('fg') || 0.84), Number(Q.get('fb') || 0.62)); if (k[2] === 'semi') { m.roughness = 0.45; m.envMapIntensity = 0.4; } }   // 地板：暖木色 + 很弱的反射   // 地板：弱反射，映出窗和灯的朦胧亮斑
-          // 新版 three 里 scene.environment 的强度由 scene.environmentIntensity 统一决定，材质自己的 envMapIntensity 不生效；楼道要压低环境光，所以显式挂上 envMap
-          if (k[1] === '5') { m.envMap = scene.environment; m.envMapIntensity = k[2] === 'metal' ? 1.0 : Number(Q.get('cenv') || 0.24); m.lightMapIntensity *= Number(Q.get('cg') || 3.2); m.color.setRGB(Number(Q.get('ccr') || 0.94), Number(Q.get('ccg') || 0.98), Number(Q.get('ccb') || 1.38)); }   // 楼道比屋里暗：老楼昏暗
+          // 新版 three 里 scene.environment 的强度由 scene.environmentIntensity 统一决定，材质自己的 envMapIntensity 不生效；楼道和门牌要单独控制反射，所以显式挂上 envMap
+          const isC = CORR.has(k[1]);
+          if (isC || (k[1] === '4' && k[2] === 'gloss')) {
+            if (k[2] === 'metal') { m.envMap = corEnvTex; m.envMapIntensity = Number(Q.get('cem') || (k[1] === '9' ? 0.12 : 1.6)); m.metalness = 0.55; }   // 门五金(图集9)：反射太强会变一片死白，压到 0.12 才是拉丝不锈钢的灰
+            else if (k[2] === 'gloss') { m.envMap = corEnvTex; m.envMapIntensity = Number(Q.get('ceg') || (k[1] === '9' ? 0.8 : k[1] === '5' ? 0.6 : 1.1)); m.metalness = 0; m.roughness = 0.3; }   // 门板和门框的亮漆：反射减弱，免得发白发橘}
+            else { m.envMap = scene.environment; m.envMapIntensity = Number(Q.get('cenv') || 0.24); }
+          }
+          if (isC) {
+            m.lightMapIntensity *= Number(Q.get('cg') || (k[1] === '9' ? (k[2] === 'metal' ? 0.604 : 0.762) : 3.2));   // 门(图集9)的光照图本身较亮，不再额外放大 3.2 倍，改成略压暗（门板深红棕）
+            if (k[1] !== '9') m.color.setRGB(Number(Q.get('ccr') || 0.94), Number(Q.get('ccg') || 0.98), Number(Q.get('ccb') || 1.38));   // 楼道比屋里暗：老楼昏暗
+          }
           if (m.map) m.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          if (lmB && manifest.lmB.atlas === k[1]) blendMat(m);
+          if (lmBs[k[1]]) blendMat(m, lmBs[k[1]], k[1] !== '9');
           m.needsUpdate = true;
         }
       });
     });
+    built = true;
     scene.add(gltf.scene);
+    addStairFiller();
     gltf.scene.updateMatrixWorld(true);
-    for (const n of ['nightstand_drawer', 'wd_door_b_l', 'wd_door_b_r', 'clothes_top', 'door_slab', 'door_lever_o', 'plate302']) {
+    for (const n of ['nightstand_drawer', 'wd_door_b_l', 'wd_door_b_r', 'clothes_top', 'clothes_knit', 'ns_ai_body', 'ai_wardrobe', 'door_slab', 'door_lever_o', 'plate302', 'speaker_mini']) {
       const o = gltf.scene.getObjectByName(n);
       if (!o) { console.warn('缺少活动部件', n); continue; }
       parts[n] = o; closed[n] = { p: o.position.clone(), r: o.rotation.clone() };
@@ -398,21 +588,34 @@ export function createWorld(host, W, H) {
     if (parts.door_slab && parts.door_lever_o) parts.door_slab.attach(parts.door_lever_o);   // 把手、门牌跟着门板转
     if (parts.door_slab && parts.plate302) parts.door_slab.attach(parts.plate302);
     buildOutlines();
-    addNightWindow(); addLampGlows(); addContactShadows();
+    addNightWindow(); addLampGlows(); addContactShadows(); addExitGuide();
     renderer.compile(scene, camera);   // 提前编译着色器，免得进屋第一帧卡一下
     stats.loadMs = Math.round(performance.now() - t0);
     stats.ready = true;
     progressCbs.forEach(f => f(1));
+    diag('房间就绪，用时 ' + stats.loadMs + 'ms');
   }
-  const ready = load();
-  ready.catch(e => console.error('房间加载失败', e));
+  let ready = load();
+  ready.catch(e => { console.error('房间加载失败', e); diag('加载失败 ' + (e && e.message)); });
+  // 加载失败后只重下失败的部分（已下好的文件有缓存），不用整页刷新
+  function reload() {
+    if (stats.ready || built) return ready;
+    diag('重新加载');
+    ready = load();
+    ready.catch(e => { console.error('房间加载失败', e); diag('加载失败 ' + (e && e.message)); });
+    return ready;
+  }
+  renderer.domElement.addEventListener('webglcontextlost', e => {
+    e.preventDefault(); diag('WebGL 上下文丢失');
+    showFatal('手机内存不足，请关掉其它应用后刷新');
+  });
 
   // ===== 主循环用 =====
   let tAcc = 0;
   function update(dt) {
     tAcc += dt;
-    for (const sp of glows) { const d = camera.position.distanceTo(sp.position); const k = Math.min(1, Math.max(0, (d - 1.8) / 1.4)); sp.material.opacity = 0.14 * k * k * (3 - 2 * k); }   // 离镜头近时光晕淡出，免得糊在镜头前
-    updateOutlines(dt);
+    for (const sp of glows) { const d = camera.position.distanceTo(sp.position); const k = Math.min(1, Math.max(0, (d - 1.8) / 1.4)); sp.material.opacity = sp.userData.ba * k * k * (3 - 2 * k); }   // 离镜头近时光晕淡出，免得糊在镜头前
+    updateOutlines(dt); updateExitGuide(dt);
     for (const id in containers) {
       const c = containers[id];
       if (c.dir && c.p < 1) { c.p = Math.min(1, c.p + dt / c.dur); c.apply(c.p); }
@@ -461,7 +664,7 @@ export function createWorld(host, W, H) {
         '  #include <colorspace_fragment>',
         '  if (uMaskOn > 0.5) {',
         '    float m0 = texture2D(tMask, vUv).r; float mx = 0.0;',
-        '    for (int i = 0; i < 12; i++) { float an = 6.2831853 * float(i) / 12.0; vec2 d = vec2(cos(an), sin(an)) * uTexel * uMaskPx; mx = max(mx, texture2D(tMask, vUv + d).r); mx = max(mx, texture2D(tMask, vUv + d * 0.55).r); }',
+        '    for (int i = 0; i < 16; i++) { float an = 6.2831853 * float(i) / 16.0; vec2 d = vec2(cos(an), sin(an)) * uTexel * uMaskPx; mx = max(mx, texture2D(tMask, vUv + d).r); mx = max(mx, texture2D(tMask, vUv + d * 0.7).r); mx = max(mx, texture2D(tMask, vUv + d * 0.4).r); }',
         '    float e = clamp((mx - m0) * 1.6, 0.0, 1.0) * uMaskA;',
         '    gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(uMaskCol), e);',
         '  }',
@@ -525,7 +728,7 @@ export function createWorld(host, W, H) {
     const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
     const spot = (x, z, r, a, sx = 1, sz = 1) => {
       const m = new THREE.Mesh(new THREE.PlaneGeometry(r * 2 * sx, r * 2 * sz), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: a, depthWrite: false, toneMapped: false, color: 0x000000 }));
-      m.rotation.x = -Math.PI / 2; m.position.set(x, 0.004, z); m.renderOrder = 2; scene.add(m);
+      m.rotation.x = -Math.PI / 2; m.position.set(x, 0.004, z); m.renderOrder = 2; m.userData.noOcc = true; scene.add(m);
     };
     spot(1.7, -0.4, 0.36, 0.38);                                     // 办公椅：五星脚下一整片
     for (let k = 0; k < 5; k++) { const a = k * 2 * Math.PI / 5 + 0.3 + 1.87 * 0; spot(1.7 + 0.31 * Math.cos(a), -0.4 + 0.31 * Math.sin(a), 0.06, 0.5); }
@@ -535,9 +738,28 @@ export function createWorld(host, W, H) {
     for (const [x, z] of [[2.16, 0.56], [2.7, 0.56], [2.16, -0.96], [2.7, -0.96]]) spot(x, z, 0.06, 0.5);   // 书桌四脚
     for (const [x, z] of [[-2.69, -2.14], [-2.31, -2.14], [-2.69, -1.81], [-2.31, -1.81]]) spot(x, z, 0.05, 0.5);   // 床头柜四脚
   }
+  // ===== 撤离点引导：门垫上一圈柔和的暖色地面光晕（全部搜出后才亮，不用悬浮标记）=====
+  const exitGuide = { mesh: null, v: 0, target: 0 };
+  function addExitGuide() {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+    const g = cv.getContext('2d'); const gr = g.createRadialGradient(64, 64, 8, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(255,214,140,0.0)'); gr.addColorStop(0.55, 'rgba(255,205,120,0.55)'); gr.addColorStop(0.8, 'rgba(255,190,100,0.25)'); gr.addColorStop(1, 'rgba(255,180,90,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 2.0), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+    m.rotation.x = -Math.PI / 2; m.position.set(EXIT_POINT.x, 0.022, EXIT_POINT.z); m.renderOrder = 3; m.userData.noOcc = true; m.visible = false; scene.add(m);
+    exitGuide.mesh = m;
+  }
+  function setExitGuide(on) { exitGuide.target = on ? 1 : 0; }
+  function updateExitGuide(dt) {
+    const e = exitGuide; if (!e.mesh) return;
+    e.v += Math.sign(e.target - e.v) * Math.min(Math.abs(e.target - e.v), dt / 1.2);
+    e.mesh.visible = e.v > 0.001;
+    e.mesh.material.opacity = 0.5 * e.v * (0.75 + 0.25 * Math.sin(tAcc * 2.2));
+  }
   function addNightWindow() {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(22, 11), new THREE.MeshBasicMaterial({ map: nightCityTex(), color: new THREE.Color(0.66, 0.67, 0.71).multiplyScalar(Number(Q.get('nw') || 4.2)) }));
-    m.rotation.y = -Math.PI / 2; m.position.set(11, 3.2, -0.2); scene.add(m);
+    m.rotation.y = -Math.PI / 2; m.position.set(11, 3.2, -0.2); m.userData.noOcc = true; scene.add(m);
   }
   // ===== 灯具附近柔和辉光：加色混合的小光晕精灵（几乎零成本）=====
   const glows = [];
@@ -547,9 +769,9 @@ export function createWorld(host, W, H) {
     gr.addColorStop(0, 'rgba(255,225,170,1)'); gr.addColorStop(0.25, 'rgba(255,190,110,0.45)'); gr.addColorStop(1, 'rgba(255,160,70,0)');
     g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
     const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
-    for (const [x, y, z, sc] of [[-2.5, 0.88, -1.95, 0.8], [-0.55, 0.9, 0.75, 0.75], [2.4, 1.62, 1.45, 1.1], [-2.2, 2.66, 1.4, 0.7], [2.45, 0.95, -0.62, 0.5]]) {
+    for (const [x, y, z, sc, ba] of [[-2.5, 0.88, -1.95, 0.9, 0.24], [2.4, 1.62, 1.45, 1.3, 0.26], [-2.2, 2.66, 1.4, 0.7, 0.14], [2.45, 0.95, -0.62, 0.5, 0.14]]) {
       const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.15 }));
-      sp.position.set(x, y, z); sp.scale.set(sc, sc, 1); sp.renderOrder = 6; scene.add(sp); glows.push(sp);
+      sp.userData.ba = ba; sp.position.set(x, y, z); sp.scale.set(sc, sc, 1); sp.renderOrder = 6; sp.userData.noOcc = true; scene.add(sp); glows.push(sp);
     }
   }
   let postT = 0;
@@ -585,8 +807,8 @@ export function createWorld(host, W, H) {
   return {
     renderer, camera, scene, containers, update, render, resize,
     get ext() { return getExt(); },
-    open, markSearched, setMarkersVisible, setGlow, door, setExposureMul(m) { expMul = m; },
+    open, markSearched, setMarkersVisible, setGlow, setExitGuide, setSpeaker, get exitGuideValue() { return exitGuide.v; }, door, setExposureMul(m) { expMul = m; },
     pickAt, pickAim(maxDist) { return pickAt(0, 0, maxDist); }, setAim, setHint, outlineAlpha,
-    ready, stats, onProgress(f) { progressCbs.push(f); f(frac); }, get progress() { return frac; },
+    get ready() { return ready; }, reload, stats, onProgress(f) { progressCbs.push(f); f(frac); }, get progress() { return frac; },
   };
 }
